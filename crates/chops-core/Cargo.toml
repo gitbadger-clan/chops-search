@@ -1,0 +1,14 @@
+[package]
+name = "chops-core"
+version = "0.1.0"
+edition = "2021"
+description = "Pure engine: WordPiece, int8 row store, scoring, RRF, formats. No I/O."
+
+[dependencies]
+# NFD decomposition + combining-mark detection for BERT-style accent
+# stripping (strip_accents inherits from lowercase=true in the potion
+# tokenizer config). Pure Rust, no_std-capable, compiles to wasm.
+# Costs some tens of KB of tables in the wasm blob; if that ever hurts,
+# replace normalize() with a Latin-1/Latin-Ext-A fold table and accept
+# drift on non-Latin scripts.
+unicode-normalization = "0.1"

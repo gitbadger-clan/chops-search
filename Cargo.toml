@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/chops-core",
+    "crates/chops-cli",
+    "crates/chops-wasm",
+]
+
+# Size discipline for the wasm blob. The CLI also inherits this; if build
+# times or CLI throughput ever matter, add a per-package override.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+
+# panic = "abort" breaks `cargo test --release`; tests run in dev profile.

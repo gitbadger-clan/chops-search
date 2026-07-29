@@ -1,0 +1,15 @@
+[package]
+name = "chops-wasm"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+chops-core = { path = "../chops-core" }
+wasm-bindgen = "0.2"
+
+# No web-sys, no wasm-bindgen-futures, no fetch from Rust. HTTP calls
+# aren't where the correctness risk lives; the tokenizer is. JS is the
+# dumb byte pump.

@@ -1,0 +1,8 @@
+//! Library surface of the build tool. Exists so integration tests (the
+//! model2vec-rs parity oracle) can reach the model loader — a pure binary
+//! crate's internals are unreachable from tests/.
+
+pub mod explain;
+pub mod frontmatter;
+pub mod model_loader;
+pub mod pca;
