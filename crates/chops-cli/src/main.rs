@@ -337,6 +337,37 @@ fn write_report(out: &Path, name: &str, bytes: &[u8]) -> Result<()> {
 // URL mapping
 // ---------------------------------------------------------------------
 
+/// Strip a leading `YYYY-MM-DD` followed by `-` or `_`, as Zola does when
+/// deriving a slug from a filename or bundle directory. A name that is
+/// only a date is returned unchanged (Zola doesn't strip those), as is
+/// anything whose digits aren't a plausible date.
+///
+/// Not handled: the RFC3339 form (`2002-10-02T15:00:00Z-slug`). Zola
+/// accepts it, but it's Windows-hostile and unused here.
+fn strip_date_prefix(name: &str) -> &str {
+    let b = name.as_bytes();
+    if b.len() < 12 {
+        return name;
+    }
+    let digits_at = |r: std::ops::Range<usize>| b[r].iter().all(u8::is_ascii_digit);
+    if !(digits_at(0..4) && b[4] == b'-' && digits_at(5..7) && b[7] == b'-' && digits_at(8..10)) {
+        return name;
+    }
+    if !matches!(b[10], b'-' | b'_') {
+        return name;
+    }
+    let month: u32 = name[5..7].parse().unwrap_or(0);
+    let day: u32 = name[8..10].parse().unwrap_or(0);
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return name;
+    }
+    let rest = &name[11..];
+    if rest.is_empty() {
+        name
+    } else {
+        rest
+    }
+}
 /// Map a content-relative path + front matter to the URL Zola will give
 /// the page, replicating Zola's defaults: `path` override wins outright;
 /// `slug` replaces the final segment; page bundles collapse (`foo/index.md`
@@ -367,6 +398,12 @@ fn url_for(rel: &Path, fm: &FrontMatter) -> String {
             Some(last) => *last = slug.clone(),
             None => segs.push(slug.clone()),
         }
+    } else if let Some(last) = segs.last_mut() {
+        // Zola parses a YYYY-MM-DD prefix as the page date and drops it
+        // from the slug. Front-matter `date` overrides the date but NOT
+        // the stripping — 2024-06-04-using-go-chromedp with
+        // date = 2024-06-06 still lives at /blog/using-go-chromedp/.
+        *last = strip_date_prefix(last).to_string();
     }
     let segs: Vec<String> = segs
         .iter()
@@ -478,6 +515,33 @@ mod tests {
                 &fm()
             ),
             "/labs/lost-tasks-on-server-crash/01-baseline/"
+        );
+    }
+
+    #[test]
+    fn date_prefixes_are_stripped_like_zola() {
+        assert_eq!(
+            url_for(
+                Path::new("blog/2024-06-04-using-go-chromedp/index.md"),
+                &fm()
+            ),
+            "/blog/using-go-chromedp/"
+        );
+        assert_eq!(
+            url_for(Path::new("blog/2022-07-21_topic/index.md"), &fm()),
+            "/blog/topic/"
+        );
+        // Not a date → not stripped.
+        assert_eq!(
+            url_for(Path::new("blog/2024-tbd-ai-landscape/index.md"), &fm()),
+            "/blog/2024-tbd-ai-landscape/"
+        );
+        // slug wins outright, no date logic.
+        let mut f = fm();
+        f.slug = Some("custom".into());
+        assert_eq!(
+            url_for(Path::new("blog/2024-06-04-x/index.md"), &f),
+            "/blog/custom/"
         );
     }
 }
