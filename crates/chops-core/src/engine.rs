@@ -119,7 +119,6 @@ impl Engine {
         let ids = self.vocab.tokenize(query);
         let fused = match self.store.embed(&ids) {
             Some(q) => {
-                self.used_semantic = true;
                 let sem_ranked = score::rank_docs(
                     &q,
                     &self.index.chunk_vecs,
@@ -129,7 +128,16 @@ impl Engine {
                     self.index.docs.len(),
                     self.opts,
                 );
-                rrf::fuse(&[&kw_ranked, &sem_ranked], rrf::K)
+                // The floor can empty this list: the query embedded fine,
+                // nothing was relevant. Reporting "hybrid" then would be a
+                // lie to the UI, so used_semantic tracks CONTRIBUTION, not
+                // merely that embedding succeeded.
+                self.used_semantic = !sem_ranked.is_empty();
+                if sem_ranked.is_empty() {
+                    kw_ranked
+                } else {
+                    rrf::fuse(&[&kw_ranked, &sem_ranked], rrf::K)
+                }
             }
             None => {
                 self.used_semantic = false;
