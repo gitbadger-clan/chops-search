@@ -30,6 +30,13 @@ toml = "1.1"
 # Zola-style path slugification (shares the crate chops-core already uses).
 unicode-normalization = "0.1"
 
+# Raw HF tokenizer as a parity oracle, alongside model2vec-rs. Already in
+# the tree transitively; declared here so tests can compare exact token
+# ids instead of embedding cosines. Align the version with what
+# model2vec-rs pulls (`cargo tree -p chops-cli | grep tokenizers`) so the
+# build doesn't carry two copies.
+tokenizers = "0.23"
+
 [dev-dependencies]
 # Official MinishLab implementation, used ONLY as a parity oracle in
 # tests/model2vec_parity.rs — never as the production embedding path.
