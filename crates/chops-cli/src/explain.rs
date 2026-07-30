@@ -132,8 +132,8 @@ pub fn explain(artifacts: &Path, query: &str, limit: usize) -> Result<()> {
     let rank_of = |list: &[u16], d: u16| list.iter().position(|&x| x == d);
     println!();
     println!(
-        "{:<4} {:>8} {:>4} {:>9} {:>5} {:>9} {:>7}  {}",
-        "doc", "fused", "kw#", "kw-score", "sem#", "best-cos", "chunks", "title"
+        "{:<4} {:>8} {:>4} {:>9} {:>5} {:>9} {:>7}  title",
+        "doc", "fused", "kw#", "kw-score", "sem#", "best-cos", "chunks"
     );
     for &d in fused.iter().take(limit) {
         let kwr = rank_of(&kw_ranked, d);

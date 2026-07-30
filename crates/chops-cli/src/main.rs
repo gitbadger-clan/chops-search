@@ -87,6 +87,21 @@ enum Cmd {
         /// The query string.
         query: String,
     },
+    /// Score the engine against a labeled query set (recall@1 by kind).
+    Eval {
+        /// Directory containing the built artifacts.
+        #[arg(long, default_value = "../static/search")]
+        artifacts: PathBuf,
+        /// Labeled query set.
+        #[arg(long, default_value = "fixtures/queries.toml")]
+        queries: PathBuf,
+        /// Only run cases of this kind (exact, paraphrase, navigational, negative).
+        #[arg(long)]
+        kind: Option<String>,
+        /// Exit non-zero if overall recall@1 falls below this fraction (0.0–1.0).
+        #[arg(long, default_value_t = 0.0)]
+        fail_under: f32,
+    },
 }
 
 fn main() -> Result<()> {
@@ -105,6 +120,12 @@ fn main() -> Result<()> {
             limit,
             query,
         } => chops_cli::explain::explain(&artifacts, &query, limit),
+        Cmd::Eval {
+            artifacts,
+            queries,
+            kind,
+            fail_under,
+        } => chops_cli::eval::eval(&artifacts, &queries, kind.as_deref(), fail_under),
     }
 }
 
