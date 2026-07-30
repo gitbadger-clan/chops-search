@@ -16,6 +16,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use chops_core::format::{Index, ModelMeta};
 use chops_core::keyword;
+use chops_core::keyword::keyword_words;
 use chops_core::rrf;
 use chops_core::score;
 use chops_core::store::RowStore;
@@ -45,7 +46,7 @@ pub fn explain(artifacts: &Path, query: &str, limit: usize) -> Result<()> {
 
     // ---- Tokenization report (both pipelines) --------------------------
     let norm = Vocab::normalize(query);
-    let words: Vec<&str> = Vocab::words(&norm)
+    let words: Vec<&str> = keyword_words(&norm)
         .into_iter()
         .filter(|w| w.chars().any(|c| c.is_alphanumeric()))
         .collect();

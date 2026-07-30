@@ -102,6 +102,30 @@ impl KeywordIndex {
     }
 }
 
+/// Word split for the KEYWORD index — deliberately not BertPreTokenizer.
+/// Keyword search wants every non-alphanumeric to be a boundary, so
+/// `25°C` yields "25" and "c" rather than one unsearchable term. Sharing
+/// `Vocab::words` coupled keyword recall to BERT's symbol/punctuation
+/// asymmetry, which exists for embedding parity and has no business
+/// shaping an inverted index.
+pub fn keyword_words(normalized: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start: Option<usize> = None;
+    for (i, c) in normalized.char_indices() {
+        if c.is_alphanumeric() {
+            if start.is_none() {
+                start = Some(i);
+            }
+        } else if let Some(s) = start.take() {
+            out.push(&normalized[s..i]);
+        }
+    }
+    if let Some(s) = start {
+        out.push(&normalized[s..]);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

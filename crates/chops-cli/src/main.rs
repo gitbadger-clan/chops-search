@@ -33,6 +33,7 @@ use chops_core::builder::{
 };
 use chops_core::chunk::{chunk_prose, prepare_markdown};
 use chops_core::format::{Doc, Index, ModelMeta};
+use chops_core::keyword::keyword_words;
 use chops_core::wordpiece::Vocab;
 
 /// Extra term-frequency weight for title words (a title mention counts
@@ -220,7 +221,7 @@ fn build(
         let mut tf: HashMap<String, u16> = HashMap::new();
         let mut count_words = |text: &str, weight: u16| {
             let norm = Vocab::normalize(text);
-            for w in Vocab::words(&norm) {
+            for w in keyword_words(&norm) {
                 if w.chars().any(|c| c.is_alphanumeric()) {
                     let e = tf.entry(w.to_string()).or_insert(0);
                     *e = e.saturating_add(weight);

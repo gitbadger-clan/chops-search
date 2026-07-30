@@ -110,10 +110,7 @@ impl Engine {
         // Keyword side works on word-level tokens (pre-WordPiece) so
         // out-of-vocabulary terms are first-class here.
         let norm = Vocab::normalize(query);
-        let words: Vec<&str> = Vocab::words(&norm)
-            .into_iter()
-            .filter(|w| w.chars().any(|c| c.is_alphanumeric()))
-            .collect();
+        let words: Vec<&str> = Vocab::words(&norm).into_iter().collect();
         let kw_ranked = self.kw.rank(&words);
 
         let ids = self.vocab.tokenize(query);
