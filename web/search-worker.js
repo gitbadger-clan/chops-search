@@ -1,9 +1,11 @@
 // Web Worker: the dumb byte pump. All decisions live in the wasm engine;
 // this file fetches, ingests, renders nothing, and never touches vectors.
 //
-// Runs off the main thread (Pagefind-style) so tokenization and scoring
-// never block typing. Load it as a module worker:
-//   new Worker('/search/search-worker.js', { type: 'module' })
+// Change from upstream (fix #7): on a 206, ingest at the offset the server
+// SAYS it sent (Content-Range) rather than the offset we asked for. They
+// agree on every sane server; when a misbehaving proxy rewrites the range,
+// trusting the response header turns silent corruption into either correct
+// ingestion or a loud row-alignment error from the engine.
 //
 // Protocol (postMessage):
 //   in : { type: 'init', base }            base = '/search'
@@ -49,6 +51,15 @@ async function boot() {
   engine.ingest(0, prefix);
 }
 
+// "Content-Range: bytes 512-1023/9469952" → 512. Null when absent or in a
+// shape we don't understand (e.g. "bytes */N" for unsatisfiable ranges).
+function contentRangeStart(response) {
+  const m = /^bytes (\d+)-\d+\/(?:\d+|\*)$/.exec(
+    response.headers.get('Content-Range') ?? ''
+  );
+  return m ? Number(m[1]) : null;
+}
+
 async function query(q, gen, limit) {
   if (!engine) return;
 
@@ -67,12 +78,14 @@ async function query(q, gen, limit) {
         fetch(`${base}/model.rows.i8`, {
           headers: { Range: `bytes=${start}-${end - 1}` },
         }).then(async (r) => {
-          // 206 = partial as asked. 200 = server ignored Range and sent
-          // the whole file; ingest it all at offset 0 — wasteful once,
-          // then everything is loaded forever.
           if (r.status === 206) {
-            engine.ingest(start, new Uint8Array(await r.arrayBuffer()));
+            // Ingest at the offset the server declares. Fall back to the
+            // requested start only if Content-Range is missing/unparseable.
+            const declared = contentRangeStart(r);
+            engine.ingest(declared ?? start, new Uint8Array(await r.arrayBuffer()));
           } else if (r.ok) {
+            // 200 = server ignored Range and sent the whole file; ingest it
+            // all at offset 0 — wasteful once, then everything is loaded.
             engine.ingest(0, new Uint8Array(await r.arrayBuffer()));
           } else {
             throw new Error(`range fetch failed: ${r.status}`);
