@@ -30,6 +30,7 @@ pub struct Engine {
     dim: usize,
     prefix_rows: u32,
     used_semantic: bool,
+    opts: crate::score::ScoreOpts,
 }
 
 impl Engine {
@@ -53,6 +54,7 @@ impl Engine {
             dim,
             prefix_rows: meta.prefix_rows,
             used_semantic: false,
+            opts: crate::score::ScoreOpts::default(),
         })
     }
 
@@ -96,6 +98,12 @@ impl Engine {
         self.store.ingest(byte_start as usize, bytes)
     }
 
+    /// Override scoring thresholds (eval sweeps these; the browser uses
+    /// the defaults).
+    pub fn set_score_opts(&mut self, opts: crate::score::ScoreOpts) {
+        self.opts = opts;
+    }
+
     /// Hybrid search: keyword tf-idf and semantic ranked lists fused with
     /// RRF. Returns ranked doc ids, truncated to `limit`.
     pub fn search(&mut self, query: &str, limit: usize) -> Vec<u16> {
@@ -119,6 +127,7 @@ impl Engine {
                     self.index.global_scale,
                     &self.index.chunk_doc,
                     self.index.docs.len(),
+                    self.opts,
                 );
                 rrf::fuse(&[&kw_ranked, &sem_ranked], rrf::K)
             }

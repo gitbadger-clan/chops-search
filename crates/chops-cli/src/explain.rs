@@ -117,6 +117,7 @@ pub fn explain(artifacts: &Path, query: &str, limit: usize) -> Result<()> {
                 index.global_scale,
                 &index.chunk_doc,
                 index.docs.len(),
+                score::ScoreOpts::default(),
             )
         }
     };
@@ -132,8 +133,8 @@ pub fn explain(artifacts: &Path, query: &str, limit: usize) -> Result<()> {
     let rank_of = |list: &[u16], d: u16| list.iter().position(|&x| x == d);
     println!();
     println!(
-        "{:<4} {:>8} {:>4} {:>9} {:>5} {:>9} {:>7}  title",
-        "doc", "fused", "kw#", "kw-score", "sem#", "best-cos", "chunks"
+        "{:<4} {:>8} {:>4} {:>9} {:>5} {:>9} {:>8} {:>7}  title",
+        "doc", "fused", "kw#", "kw-score", "sem#", "best-cos", "penalty", "chunks"
     );
     for &d in fused.iter().take(limit) {
         let kwr = rank_of(&kw_ranked, d);
@@ -141,8 +142,23 @@ pub fn explain(artifacts: &Path, query: &str, limit: usize) -> Result<()> {
         let fused_score = kwr.map_or(0.0, |r| 1.0 / (rrf::K + (r + 1) as f32))
             + smr.map_or(0.0, |r| 1.0 / (rrf::K + (r + 1) as f32));
         let opt_rank = |r: Option<usize>| r.map_or_else(|| "-".into(), |r| (r + 1).to_string());
+
+        let n_chunks = chunk_count[d as usize] as usize;
+        let raw = best_cos[d as usize];
+        let (cos_s, pen_s) = if raw > f32::NEG_INFINITY {
+            let p = score::chunk_correction(n_chunks, score::CHUNK_PENALTY);
+            let pen = if p > 0.0 {
+                format!("-{p:.3}")
+            } else {
+                "0".to_string()
+            };
+            (format!("{raw:.3}"), pen)
+        } else {
+            ("-".to_string(), "-".to_string())
+        };
+
         println!(
-            "{:<4} {:>8.5} {:>4} {:>9} {:>5} {:>9} {:>7}  {}",
+            "{:<4} {:>8.5} {:>4} {:>9} {:>5} {:>9} {:>8} {:>7}  {}",
             d,
             fused_score,
             opt_rank(kwr),
@@ -150,12 +166,9 @@ pub fn explain(artifacts: &Path, query: &str, limit: usize) -> Result<()> {
                 .get(&d)
                 .map_or_else(|| "-".into(), |s| format!("{s:.3}")),
             opt_rank(smr),
-            if best_cos[d as usize] > f32::NEG_INFINITY {
-                format!("{:.3}", best_cos[d as usize])
-            } else {
-                "-".into()
-            },
-            chunk_count[d as usize],
+            cos_s,
+            pen_s,
+            n_chunks,
             index.docs[d as usize].title,
         );
     }
