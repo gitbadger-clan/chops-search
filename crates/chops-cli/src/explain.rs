@@ -15,6 +15,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use chops_core::format::{Index, ModelMeta};
+use chops_core::keyword;
 use chops_core::rrf;
 use chops_core::score;
 use chops_core::store::RowStore;
@@ -60,6 +61,7 @@ pub fn explain(artifacts: &Path, query: &str, limit: usize) -> Result<()> {
 
     // ---- Keyword side, with scores (same formula as core::keyword) -----
     let kw = index.keyword_index();
+    println!("kw:        avgdl={:.1}", kw.avgdl);
     let n = kw.n_docs as f32;
     let mut kw_scores: HashMap<u16, f32> = HashMap::new();
     let mut seen: Vec<&str> = Vec::new();
@@ -76,7 +78,10 @@ pub fn explain(artifacts: &Path, query: &str, limit: usize) -> Result<()> {
         let idf = ((n - df + 0.5) / (df + 0.5) + 1.0).ln();
         println!("keyword:   {w:?} df={df} idf={idf:.3}");
         for &(doc, tf) in postings {
-            *kw_scores.entry(doc).or_insert(0.0) += idf * (1.0 + (tf as f32).ln());
+            let tf = tf as f32;
+            let norm =
+                keyword::K1 * (1.0 - keyword::B + keyword::B * kw.dl[doc as usize] / kw.avgdl);
+            *kw_scores.entry(doc).or_insert(0.0) += idf * (tf * (keyword::K1 + 1.0)) / (tf + norm);
         }
     }
     let kw_ranked = kw.rank(&words);

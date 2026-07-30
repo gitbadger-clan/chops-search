@@ -200,10 +200,7 @@ impl Index {
         for (term, postings) in &self.terms {
             map.insert(Box::from(term.as_str()), postings.clone());
         }
-        KeywordIndex {
-            n_docs: self.docs.len() as u16,
-            terms: map,
-        }
+        KeywordIndex::new(self.docs.len() as u16, map)
     }
 }
 
