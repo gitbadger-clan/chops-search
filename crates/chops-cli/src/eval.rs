@@ -38,6 +38,8 @@ pub fn eval(
     queries: &Path,
     kind_filter: Option<&str>,
     fail_under: f32,
+    min_cos: Option<f32>,
+    chunk_penalty: Option<f32>,
 ) -> Result<()> {
     let cases = load_cases(queries, kind_filter)?;
     if cases.is_empty() {
@@ -51,6 +53,18 @@ pub fn eval(
     let rows_bytes = fs::read(artifacts.join("model.rows.i8")).context("model.rows.i8")?;
 
     let mut engine = Engine::new(&meta_bytes, &index_bytes).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let mut opts = chops_core::score::ScoreOpts::default();
+    if let Some(v) = min_cos {
+        opts.min_cos = v;
+    }
+    if let Some(v) = chunk_penalty {
+        opts.chunk_penalty = v;
+    }
+    engine.set_score_opts(opts);
+    println!(
+        "scoring:   min_cos {:.2}, chunk_penalty {:.3}",
+        opts.min_cos, opts.chunk_penalty
+    );
     engine
         .ingest(0, &prefix_bytes)
         .map_err(|e| anyhow::anyhow!("{e}"))?;

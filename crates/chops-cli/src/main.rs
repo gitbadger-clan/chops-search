@@ -101,6 +101,12 @@ enum Cmd {
         /// Exit non-zero if overall recall@1 falls below this fraction (0.0–1.0).
         #[arg(long, default_value_t = 0.0)]
         fail_under: f32,
+        /// Minimum raw best-chunk similarity (semantic floor).
+        #[arg(long)]
+        min_cos: Option<f32>,
+        /// Coefficient on the √(2 ln n) chunk-count correction.
+        #[arg(long)]
+        chunk_penalty: Option<f32>,
     },
 }
 
@@ -125,7 +131,16 @@ fn main() -> Result<()> {
             queries,
             kind,
             fail_under,
-        } => chops_cli::eval::eval(&artifacts, &queries, kind.as_deref(), fail_under),
+            min_cos,
+            chunk_penalty,
+        } => chops_cli::eval::eval(
+            &artifacts,
+            &queries,
+            kind.as_deref(),
+            fail_under,
+            min_cos,
+            chunk_penalty,
+        ),
     }
 }
 
