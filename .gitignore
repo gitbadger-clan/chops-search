@@ -3,7 +3,6 @@
 # ==========================================
 /target/
 **/*.rs.bk
-Cargo.lock
 
 # Note: Keep `Cargo.lock` if this is a binary/runnable app rather than a library.
 # Uncomment the line below if you prefer to commit Cargo.lock for libraries:
