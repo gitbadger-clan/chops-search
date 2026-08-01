@@ -72,4 +72,16 @@ impl Engine {
     pub fn doc_title(&self, id: u16) -> Option<String> {
         self.inner.doc_title(id).map(str::to_owned)
     }
+    /// The chunk whose text should be shown as this doc's snippet — the
+    /// one that scored highest for the last search, or a body-chunk
+    /// fallback when the semantic side didn't rank it.
+    pub fn best_chunk(&self, id: u16) -> u32 {
+        self.inner.best_chunk(id)
+    }
+
+    /// Total chunks. The JS pump needs this to size the snippets.bin
+    /// offset header before requesting it.
+    pub fn chunk_count(&self) -> usize {
+        self.inner.chunk_count()
+    }
 }

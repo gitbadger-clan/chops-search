@@ -53,6 +53,15 @@ pub struct ScoreOpts {
     pub chunk_penalty: f32,
 }
 
+/// A ranked document plus the chunk that earned it its score — the chunk
+/// whose text becomes the snippet.
+#[derive(Debug, Clone, Copy)]
+pub struct Ranked {
+    pub doc: u16,
+    pub chunk: u32,
+    pub score: f32,
+}
+
 impl Default for ScoreOpts {
     fn default() -> Self {
         ScoreOpts {
@@ -84,14 +93,8 @@ pub fn chunk_correction(n: usize, coeff: f32) -> f32 {
 
 /// Rank documents by their best-scoring chunk, descending.
 ///
-/// - `q`: normalized f32 query vector, length `dim`
-/// - `chunk_vecs`: n_chunks × dim int8
-/// - `chunk_doc`: chunk index → doc id
-/// - `n_docs`: total docs (doc ids are 0..n_docs)
-///
-/// Returns ranked doc ids. Docs with no chunks are omitted, as are docs
-/// whose raw best similarity is below `opts.min_cos`. Ties break on doc id
-/// for byte-stable output.
+/// Doc ids only. Callers that need to know WHICH chunk won — for
+/// snippets — want `rank_docs_detailed`.
 pub fn rank_docs(
     q: &[f32],
     chunk_vecs: &[i8],
@@ -101,10 +104,36 @@ pub fn rank_docs(
     n_docs: usize,
     opts: ScoreOpts,
 ) -> Vec<u16> {
+    rank_docs_detailed(q, chunk_vecs, dim, global_scale, chunk_doc, n_docs, opts)
+        .into_iter()
+        .map(|r| r.doc)
+        .collect()
+}
+
+/// As `rank_docs`, but also reports the winning chunk and the adjusted
+/// score per document.
+///
+/// - `q`: normalized f32 query vector, length `dim`
+/// - `chunk_vecs`: n_chunks × dim int8
+/// - `chunk_doc`: chunk index → doc id
+/// - `n_docs`: total docs (doc ids are 0..n_docs)
+///
+/// Docs with no chunks are omitted, as are docs whose raw best similarity
+/// is below `opts.min_cos`. Ties break on doc id for byte-stable output.
+pub fn rank_docs_detailed(
+    q: &[f32],
+    chunk_vecs: &[i8],
+    dim: usize,
+    global_scale: f32,
+    chunk_doc: &[u16],
+    n_docs: usize,
+    opts: ScoreOpts,
+) -> Vec<Ranked> {
     debug_assert_eq!(q.len(), dim);
     debug_assert_eq!(chunk_vecs.len(), chunk_doc.len() * dim);
 
     let mut best = vec![f32::NEG_INFINITY; n_docs];
+    let mut best_chunk = vec![u32::MAX; n_docs];
     let mut counts = vec![0usize; n_docs];
     for (c, &doc) in chunk_doc.iter().enumerate() {
         let d = doc as usize;
@@ -120,27 +149,26 @@ pub fn rank_docs(
         counts[d] += 1;
         if s > best[d] {
             best[d] = s;
+            best_chunk[d] = c as u32;
         }
     }
 
     // Floor on RAW similarity, rank on ADJUSTED.
-    let adjusted: Vec<f32> = (0..n_docs)
-        .map(|d| best[d] - chunk_correction(counts[d], opts.chunk_penalty))
-        .collect();
-
-    let mut ranked: Vec<u16> = (0..n_docs as u16)
-        .filter(|&d| {
-            let raw = best[d as usize];
-            raw > f32::NEG_INFINITY && raw >= opts.min_cos
+    let mut out: Vec<Ranked> = (0..n_docs)
+        .filter(|&d| best[d] > f32::NEG_INFINITY && best[d] >= opts.min_cos)
+        .map(|d| Ranked {
+            doc: d as u16,
+            chunk: best_chunk[d],
+            score: best[d] - chunk_correction(counts[d], opts.chunk_penalty),
         })
         .collect();
-    ranked.sort_unstable_by(|&a, &b| {
-        adjusted[b as usize]
-            .partial_cmp(&adjusted[a as usize])
+    out.sort_unstable_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
             .unwrap_or(core::cmp::Ordering::Equal)
-            .then(a.cmp(&b))
+            .then(a.doc.cmp(&b.doc))
     });
-    ranked
+    out
 }
 
 #[cfg(test)]
@@ -246,5 +274,33 @@ mod tests {
             rank_docs(&q, &chunks, 1, 0.01, &chunk_doc, 1, opts),
             vec![0]
         );
+    }
+
+    #[test]
+    fn detailed_reports_the_winning_chunk() {
+        let q = [1.0f32, 0.0];
+        let chunks: Vec<i8> = vec![
+            10, 0, // chunk0 → doc0
+            100, 0, // chunk1 → doc0, the winner
+            50, 0, // chunk2 → doc1
+        ];
+        let out = rank_docs_detailed(&q, &chunks, 2, 1.0, &[0, 0, 1], 2, ScoreOpts::raw());
+        assert_eq!(out[0].doc, 0);
+        assert_eq!(
+            out[0].chunk, 1,
+            "should name the strong chunk, not the first"
+        );
+        assert_eq!(out[1].doc, 1);
+        assert_eq!(out[1].chunk, 2);
+    }
+
+    #[test]
+    fn tied_chunks_pick_the_earliest() {
+        // Deterministic snippet selection: equal scores must not depend on
+        // iteration incidentals, or the artifact stops being byte-stable.
+        let q = [1.0f32];
+        let chunks: Vec<i8> = vec![50, 50, 50];
+        let out = rank_docs_detailed(&q, &chunks, 1, 1.0, &[0, 0, 0], 1, ScoreOpts::raw());
+        assert_eq!(out[0].chunk, 0);
     }
 }

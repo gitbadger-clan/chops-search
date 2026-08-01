@@ -30,6 +30,13 @@ pub struct Engine {
     dim: usize,
     prefix_rows: u32,
     used_semantic: bool,
+    /// doc id → chunk that produced its score in the last search;
+    /// u32::MAX where the semantic side didn't rank the doc.
+    best_chunk: Vec<u32>,
+    /// First chunk index of each doc — chunks are contiguous per doc
+    /// because the builder emits them in doc order. Used for the
+    /// keyword-only snippet fallback.
+    doc_first_chunk: Vec<u32>,
     opts: crate::score::ScoreOpts,
 }
 
@@ -46,6 +53,14 @@ impl Engine {
         // the session allocates — wasm memory never grows because of us.
         let store = RowStore::new(dim, meta.tokens.len(), meta.scales.clone());
         let kw = index.keyword_index();
+        let n_docs = index.docs.len();
+        let mut doc_first_chunk = vec![u32::MAX; n_docs];
+        for (c, &doc) in index.chunk_doc.iter().enumerate() {
+            let d = doc as usize;
+            if d < n_docs && doc_first_chunk[d] == u32::MAX {
+                doc_first_chunk[d] = c as u32;
+            }
+        }
         Ok(Engine {
             vocab,
             store,
@@ -54,6 +69,8 @@ impl Engine {
             dim,
             prefix_rows: meta.prefix_rows,
             used_semantic: false,
+            best_chunk: vec![u32::MAX; n_docs],
+            doc_first_chunk,
             opts: crate::score::ScoreOpts::default(),
         })
     }
@@ -110,13 +127,13 @@ impl Engine {
         // Keyword side works on word-level tokens (pre-WordPiece) so
         // out-of-vocabulary terms are first-class here.
         let norm = Vocab::normalize(query);
-        let words: Vec<&str> = Vocab::words(&norm).into_iter().collect();
+        let words: Vec<&str> = crate::keyword::keyword_words(&norm);
         let kw_ranked = self.kw.rank(&words);
 
         let ids = self.vocab.tokenize(query);
         let fused = match self.store.embed(&ids) {
             Some(q) => {
-                let sem_ranked = score::rank_docs(
+                let detailed = score::rank_docs_detailed(
                     &q,
                     &self.index.chunk_vecs,
                     self.dim,
@@ -125,6 +142,13 @@ impl Engine {
                     self.index.docs.len(),
                     self.opts,
                 );
+                // Reset before filling: a doc ranked last query but not
+                // this one must fall back rather than show a stale snippet.
+                self.best_chunk.iter_mut().for_each(|c| *c = u32::MAX);
+                for r in &detailed {
+                    self.best_chunk[r.doc as usize] = r.chunk;
+                }
+                let sem_ranked: Vec<u16> = detailed.iter().map(|r| r.doc).collect();
                 // The floor can empty this list: the query embedded fine,
                 // nothing was relevant. Reporting "hybrid" then would be a
                 // lie to the UI, so used_semantic tracks CONTRIBUTION, not
@@ -137,6 +161,7 @@ impl Engine {
                 }
             }
             None => {
+                self.best_chunk.iter_mut().for_each(|c| *c = u32::MAX);
                 self.used_semantic = false;
                 kw_ranked
             }
@@ -148,5 +173,33 @@ impl Engine {
     /// means keyword-only: all-OOV query, or rows not yet loaded.
     pub fn used_semantic(&self) -> bool {
         self.used_semantic
+    }
+    /// Chunk to snippet for `doc`. Falls back to the doc's SECOND chunk —
+    /// its first body chunk — when the semantic side didn't rank it,
+    /// because chunk 0 is the synthetic title+tags chunk and repeating the
+    /// title under the title makes a useless snippet.
+    pub fn best_chunk(&self, doc: u16) -> u32 {
+        let d = doc as usize;
+        if let Some(&c) = self.best_chunk.get(d) {
+            if c != u32::MAX {
+                return c;
+            }
+        }
+        let first = self.doc_first_chunk.get(d).copied().unwrap_or(0);
+        if first == u32::MAX {
+            return 0;
+        }
+        let next = first as usize + 1;
+        if next < self.index.chunk_doc.len() && self.index.chunk_doc[next] == doc {
+            next as u32
+        } else {
+            first
+        }
+    }
+
+    /// Total chunks — the client needs this to size the snippet offset
+    /// header before requesting it.
+    pub fn chunk_count(&self) -> usize {
+        self.index.chunk_doc.len()
     }
 }
