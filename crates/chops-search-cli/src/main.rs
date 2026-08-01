@@ -48,6 +48,11 @@ use chops_search_core::wordpiece::Vocab;
     about = "Static-site hybrid search index builder"
 )]
 struct Cli {
+    /// Directory to resolve chops-search.toml from. Defaults to the
+    /// working directory, walking up as cargo does for Cargo.toml.
+    #[arg(long, global = true)]
+    site: Option<PathBuf>,
+
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -152,8 +157,17 @@ enum Cmd {
     },
 }
 
+fn load_config(site: &Option<PathBuf>) -> Result<Config> {
+    let start = match site {
+        Some(p) => p.clone(),
+        None => std::env::current_dir()?,
+    };
+    Config::discover(&start)
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    let site = cli.site;
     match cli.cmd {
         Cmd::Build {
             content,
@@ -184,7 +198,7 @@ fn main() -> Result<()> {
             limit,
             query,
         } => {
-            let cfg = Config::discover(&std::env::current_dir()?)?;
+            let cfg = load_config(&site)?;
             let dir = artifacts.unwrap_or(cfg.out);
             chops_search_cli::explain::explain(&dir, &query, limit)
         }
@@ -196,7 +210,7 @@ fn main() -> Result<()> {
             min_cos,
             chunk_penalty,
         } => {
-            let cfg = Config::discover(&std::env::current_dir()?)?;
+            let cfg = load_config(&site)?;
             let dir = artifacts.unwrap_or_else(|| cfg.out.clone());
             let queries = queries.unwrap_or_else(|| cfg.root.join("fixtures/queries.toml"));
             chops_search_cli::eval::eval(
@@ -209,7 +223,7 @@ fn main() -> Result<()> {
             )
         }
         Cmd::Model { action } => {
-            let cfg = Config::discover(&std::env::current_dir()?)?;
+            let cfg = load_config(&site)?;
             match action {
                 ModelCmd::Fetch {
                     repo,
@@ -226,7 +240,7 @@ fn main() -> Result<()> {
             }
         }
         Cmd::Docs { artifacts } => {
-            let cfg = Config::discover(&std::env::current_dir()?)?;
+            let cfg = load_config(&site)?;
             chops_search_cli::explain::list_docs(&artifacts.unwrap_or(cfg.out))
         }
     }
