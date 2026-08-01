@@ -37,6 +37,12 @@ unicode-normalization = "0.1"
 # build doesn't carry two copies.
 tokenizers = "0.23"
 
+# gzip for the eager artifacts. CLI-only — the browser decompresses with
+# the platform's DecompressionStream, so nothing enters the wasm tree.
+flate2 = "1"
+
+sha2 = "0.11"
+
 [dev-dependencies]
 # Official MinishLab implementation, used ONLY as a parity oracle in
 # tests/model2vec_parity.rs — never as the production embedding path.

@@ -20,10 +20,12 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
+use sha2::{Digest, Sha256};
 
 use chops_cli::frontmatter::{self, FrontMatter};
 use chops_cli::model_loader::load_model2vec;
@@ -143,6 +145,39 @@ fn main() -> Result<()> {
             chunk_penalty,
         ),
     }
+}
+
+/// Short content hash over the whole artifact set. Each part is
+/// length-prefixed so two different splits can't hash identically.
+fn build_hash(parts: &[&[u8]]) -> String {
+    let mut h = Sha256::new();
+    for p in parts {
+        h.update((p.len() as u64).to_le_bytes());
+        h.update(p);
+    }
+    h.finalize()[..8]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Remove artifacts from previous builds. Hashed names would otherwise
+/// accumulate in static/ and get copied into the site by `zola build` —
+/// invisible dead weight that grows with every rebuild.
+fn clean_artifacts(out: &Path) -> Result<()> {
+    if !out.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(out)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let stale =
+            name.starts_with("model.") || name.starts_with("index.") || name == "manifest.json";
+        if stale && entry.path().is_file() {
+            fs::remove_file(entry.path())?;
+        }
+    }
+    Ok(())
 }
 
 fn build(
@@ -334,18 +369,67 @@ fn build(
     fs::create_dir_all(out)?;
     let rows_bytes: Vec<u8> = data_i8.iter().map(|&v| v as u8).collect();
     let prefix_bytes = &rows_bytes[..prefix_rows as usize * dim];
+    let meta_out = meta.write();
+    let index_out = index.write();
 
-    write_report(out, "model.meta.bin", &meta.write())?;
-    write_report(out, "model.prefix.i8", prefix_bytes)?;
-    write_report(out, "model.rows.i8", &rows_bytes)?;
-    write_report(out, "index.bin", &index.write())?;
+    let hash = build_hash(&[&meta_out, prefix_bytes, &rows_bytes, &index_out]);
+    clean_artifacts(out)?;
+
+    let f_meta = format!("model.meta.{hash}.bin");
+    let f_prefix = format!("model.prefix.{hash}.i8");
+    let f_rows = format!("model.rows.{hash}.i8");
+    let f_index = format!("index.{hash}.bin");
+
+    write_artifact(out, &f_meta, &meta_out, true)?;
+    write_artifact(out, &f_prefix, prefix_bytes, false)?;
+    write_artifact(out, &f_rows, &rows_bytes, false)?;
+    write_artifact(out, &f_index, &index_out, true)?;
+
+    let manifest = serde_json::json!({
+        "version": 1,
+        "hash": hash,
+        "files": { "meta": f_meta, "prefix": f_prefix, "rows": f_rows, "index": f_index },
+    });
+    fs::write(
+        out.join("manifest.json"),
+        serde_json::to_vec_pretty(&manifest)?,
+    )?;
+    eprintln!("wrote {}/manifest.json (hash {hash})", out.display());
     Ok(())
 }
 
-fn write_report(out: &Path, name: &str, bytes: &[u8]) -> Result<()> {
+/// Write an artifact, plus a gzip sibling when `compress` is set.
+///
+/// Cloudflare only compresses a fixed list of content types, and
+/// `application/octet-stream` (what Wrangler assigns .bin/.i8) isn't on
+/// it — so the eager payload ships raw unless we compress it ourselves.
+/// Doing it at build time keeps this host-agnostic instead of depending
+/// on a zone-level Compression Rule that doesn't travel with the repo.
+///
+/// Range-served files are never compressed: a byte offset into a gzip
+/// stream is meaningless. The int8 row blobs wouldn't gain much anyway.
+///
+/// flate2 writes mtime 0 by default, so the .gz is byte-stable like
+/// everything else here — worth confirming with two builds and a diff.
+fn write_artifact(out: &Path, name: &str, bytes: &[u8], compress: bool) -> Result<()> {
     let path = out.join(name);
     fs::write(&path, bytes).with_context(|| format!("writing {}", path.display()))?;
-    eprintln!("wrote {} ({} KB)", path.display(), bytes.len() / 1024);
+    if !compress {
+        eprintln!("wrote {} ({} KB)", path.display(), bytes.len() / 1024);
+        return Ok(());
+    }
+    let gz_path = out.join(format!("{name}.gz"));
+    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+    enc.write_all(bytes).context("gzip encode")?;
+    let gz = enc.finish().context("gzip finish")?;
+    fs::write(&gz_path, &gz).with_context(|| format!("writing {}", gz_path.display()))?;
+    eprintln!(
+        "wrote {} ({} KB → {} KB gzip, {:.0}% saved)",
+        path.display(),
+        bytes.len() / 1024,
+        gz.len() / 1024,
+        100.0 - (gz.len() as f64 * 100.0 / bytes.len() as f64)
+    );
     Ok(())
 }
 
