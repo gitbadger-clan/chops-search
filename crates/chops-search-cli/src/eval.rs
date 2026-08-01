@@ -71,6 +71,31 @@ pub fn eval(
         .ingest(0, &prefix_bytes)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
+    // An `expect` URL that isn't in the corpus can never pass, and it
+    // reads as a ranking failure rather than a typo. Fail loudly instead:
+    // this exact class of bug — URLs that shifted under the index — once
+    // looked like a total recall collapse for an entire run.
+    let known: std::collections::HashSet<&str> = (0..engine.doc_count() as u16)
+        .filter_map(|id| engine.doc_url(id))
+        .collect();
+    let mut unknown: Vec<String> = Vec::new();
+    for case in &cases {
+        for url in &case.expect {
+            if !known.contains(url.as_str()) {
+                unknown.push(format!("  {:?} expects {url}", case.q));
+            }
+        }
+    }
+    if !unknown.is_empty() {
+        eprintln!("query set references URLs not in the index:");
+        for u in &unknown {
+            eprintln!("{u}");
+        }
+        bail!(
+            "{} unknown URL(s) — run `chops-search docs` to see what's indexed",
+            unknown.len()
+        );
+    }
     println!(
         "corpus:  {} docs, {} rows, prefix {} rows",
         engine.doc_count(),
