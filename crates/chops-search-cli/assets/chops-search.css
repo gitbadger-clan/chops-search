@@ -1,0 +1,148 @@
+/* chops-search — default styles.
+ *
+ * Plain CSS on purpose. Zola compiles Sass from `sass/`, but
+ * `chops-search build` writes into `static/`, which Zola copies verbatim
+ * — a .scss shipped here would never be compiled. Custom properties are
+ * the theming interface instead, so a site can restyle this without a
+ * preprocessor and without overriding selectors.
+ *
+ * Deliberately unopinionated: no colours of its own, no fonts, no box
+ * shadows. Everything derives from `currentColor` and the surrounding
+ * text, so it inherits a light or dark theme with no media query and no
+ * second ruleset. A search widget that imposes a look is a widget people
+ * fight rather than adopt.
+ *
+ * To restyle, set the variables on .chops (or any ancestor):
+ *
+ *   .chops {
+ *     --chops-accent: var(--my-link-color);
+ *     --chops-radius: 0;
+ *     --chops-gap: 1rem;
+ *   }
+ *
+ * To replace wholesale, don't link this file — the class names are the
+ * contract and they're listed at the bottom.
+ */
+
+.chops {
+  --chops-accent: currentColor;
+  --chops-muted: 0.7;
+  --chops-gap: 0.75rem;
+  --chops-radius: 6px;
+  --chops-mark: 18%;
+  --chops-hover: 8%;
+}
+
+/* ---- input ---------------------------------------------------------- */
+
+.chops input[type='search'] {
+  width: 100%;
+  padding: 0.6rem 0.8rem;
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+  border-radius: var(--chops-radius);
+}
+
+.chops input[type='search']:focus-visible {
+  outline: 2px solid var(--chops-accent);
+  outline-offset: 1px;
+}
+
+/* ---- status line ---------------------------------------------------- */
+
+/* Announces result counts and the keyword/hybrid mode. Kept visible
+ * rather than screen-reader-only: which engine answered is genuinely
+ * useful information, and hiding it wastes the one honest signal this
+ * search box has. */
+.chops-mode {
+  display: inline-block;
+  margin-top: 0.35rem;
+  font-size: 0.8rem;
+  opacity: var(--chops-muted);
+}
+
+.chops-mode:empty {
+  display: none;
+}
+
+/* ---- results -------------------------------------------------------- */
+
+.chops-results {
+  margin: var(--chops-gap) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.chops-results:empty {
+  display: none;
+}
+
+.chops-results > li {
+  padding: 0.4rem 0.5rem;
+  border-radius: var(--chops-radius);
+}
+
+/* Keyboard navigation state. aria-selected is the combobox pattern's
+ * cursor — the browser gives no free styling for it, and without a
+ * visible cue arrow keys move an invisible focus. */
+.chops-results > li[aria-selected='true'] {
+  background: color-mix(in srgb, currentColor var(--chops-hover), transparent);
+}
+
+.chops-results a {
+  color: var(--chops-accent);
+  text-decoration: none;
+}
+
+.chops-results a:hover,
+.chops-results a:focus-visible {
+  text-decoration: underline;
+}
+
+/* ---- snippets ------------------------------------------------------- */
+
+.chops-snippet {
+  margin: 0.15rem 0 0;
+  font-size: 0.85rem;
+  line-height: 1.4;
+  opacity: var(--chops-muted);
+}
+
+/* Snippets arrive after the results, so this is empty for a moment on
+ * every query. Collapsing rather than reserving space would make the list
+ * jump; collapsing when snippets never arrive at all (fetch failed, older
+ * build) is the right fallback. The trade is a small reflow — preferable
+ * to a permanent gap on sites that don't ship snippets. */
+.chops-snippet:empty {
+  display: none;
+}
+
+.chops-snippet mark {
+  color: inherit;
+  background: color-mix(in srgb, currentColor var(--chops-mark), transparent);
+  border-radius: 2px;
+}
+
+/* ---- reduced motion ------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  .chops * {
+    transition: none !important;
+  }
+}
+
+/* ---- class contract -------------------------------------------------
+ *
+ * These are what chops-search.js creates and expects. Restyle freely;
+ * renaming means forking the page script.
+ *
+ *   .chops                       wrapper
+ *   #chops-input                 the search input (role=combobox)
+ *   #chops-mode / .chops-mode    status line (aria-live)
+ *   #chops-results               result list (role=listbox)
+ *   .chops-results > li          one result (role=option)
+ *   .chops-snippet               matched text under a result
+ *   .chops-snippet mark          highlighted query terms
+ */
