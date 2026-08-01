@@ -15,7 +15,6 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use chops_core::format::{Index, ModelMeta};
-use chops_core::keyword;
 use chops_core::keyword::keyword_words;
 use chops_core::rrf;
 use chops_core::score;
@@ -60,29 +59,31 @@ pub fn explain(artifacts: &Path, query: &str, limit: usize) -> Result<()> {
     // ---- Keyword side, with scores (same formula as core::keyword) -----
     let kw = index.keyword_index();
     println!("kw:        avgdl={:.1}", kw.avgdl);
-    let n = kw.n_docs as f32;
+    let terms = kw.resolve(&words, true);
     let mut kw_scores: HashMap<u16, f32> = HashMap::new();
-    let mut seen: Vec<&str> = Vec::new();
-    for &w in &words {
-        if seen.contains(&w) {
-            continue;
-        }
-        seen.push(w);
-        let Some(postings) = kw.terms.get(w) else {
-            println!("keyword:   {w:?} matches no documents");
-            continue;
-        };
-        let df = postings.len() as f32;
-        let idf = ((n - df + 0.5) / (df + 0.5) + 1.0).ln();
-        println!("keyword:   {w:?} df={df} idf={idf:.3}");
+    for t in &terms {
+        let postings = &kw.terms[&t.text];
+        let idf = kw.idf(postings.len());
+        println!(
+            "keyword:   {:?} df={} idf={idf:.3}{}",
+            t.text,
+            postings.len(),
+            if t.expanded {
+                format!("  (prefix ×{})", t.weight)
+            } else {
+                String::new()
+            }
+        );
         for &(doc, tf) in postings {
-            let tf = tf as f32;
-            let norm =
-                keyword::K1 * (1.0 - keyword::B + keyword::B * kw.dl[doc as usize] / kw.avgdl);
-            *kw_scores.entry(doc).or_insert(0.0) += idf * (tf * (keyword::K1 + 1.0)) / (tf + norm);
+            *kw_scores.entry(doc).or_insert(0.0) += t.weight * kw.term_score(doc, tf, idf);
         }
     }
-    let kw_ranked = kw.rank(&words);
+    for &w in &words {
+        if !terms.iter().any(|t| t.text.as_ref() == w) {
+            println!("keyword:   {w:?} matches no documents");
+        }
+    }
+    let kw_ranked = kw.rank_terms(&terms);
 
     // ---- Semantic side, with per-doc best cosine + chunk counts --------
     let mut best_cos = vec![f32::NEG_INFINITY; index.docs.len()];
