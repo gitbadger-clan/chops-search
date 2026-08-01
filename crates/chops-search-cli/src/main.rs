@@ -58,31 +58,36 @@ enum Cmd {
     Build {
         /// Zola content directory (walked recursively for .md files).
         #[arg(long)]
-        content: PathBuf,
+        content: Option<PathBuf>,
         /// Directory containing tokenizer.json and model.safetensors.
         #[arg(long)]
-        model: PathBuf,
+        model: Option<PathBuf>,
         /// Output directory (e.g. static/search).
         #[arg(long)]
-        out: PathBuf,
+        out: Option<PathBuf>,
         /// Rows bundled eagerly in model.prefix.i8.
-        #[arg(long, default_value_t = 2048)]
-        prefix_rows: u32,
+        #[arg(long)]
+        prefix_rows: Option<u32>,
         /// Target chunk size in characters.
-        #[arg(long, default_value_t = 600)]
-        chunk_chars: usize,
+        #[arg(long)]
+        chunk_chars: Option<usize>,
         /// Reduce embedding dimensionality via PCA before quantization
         /// (e.g. 128 halves the shipped matrix). Defaults to the model's
         /// native dimensionality.
         #[arg(long)]
         dims: Option<usize>,
+
+        /// Artifacts only — skip the wasm + JS runtime. For CI jobs that
+        /// rebuild the index without shipping a new frontend.
+        #[arg(long)]
+        no_runtime: bool,
     },
     /// Explain a query against built artifacts: keyword scores, best-chunk
     /// cosines, chunk counts, and RRF contributions per document.
     Query {
         /// Directory containing the built artifacts (the --out of `build`).
-        #[arg(long, default_value = "../static/search")]
-        artifacts: PathBuf,
+        #[arg(long)]
+        artifacts: Option<PathBuf>,
         /// Max rows to print.
         #[arg(long, default_value_t = 20)]
         limit: usize,
@@ -92,11 +97,11 @@ enum Cmd {
     /// Score the engine against a labeled query set (recall@1 by kind).
     Eval {
         /// Directory containing the built artifacts.
-        #[arg(long, default_value = "../static/search")]
-        artifacts: PathBuf,
+        #[arg(long)]
+        artifacts: Option<PathBuf>,
         /// Labeled query set.
-        #[arg(long, default_value = "fixtures/queries.toml")]
-        queries: PathBuf,
+        #[arg(long)]
+        queries: Option<PathBuf>,
         /// Only run cases of this kind (exact, paraphrase, navigational, negative).
         #[arg(long)]
         kind: Option<String>,
@@ -122,12 +127,32 @@ fn main() -> Result<()> {
             prefix_rows,
             chunk_chars,
             dims,
-        } => build(&content, &model, &out, prefix_rows, chunk_chars, dims),
+            no_runtime,
+        } => {
+            let cfg = Config::discover(&std::env::current_dir()?)?.with_overrides(
+                content,
+                out,
+                model,
+                dims,
+                chunk_chars,
+                prefix_rows,
+            );
+            eprintln!(
+                "config: content {}, out {}",
+                cfg.content.display(),
+                cfg.out.display()
+            );
+            build(&cfg, !no_runtime)
+        }
         Cmd::Query {
             artifacts,
             limit,
             query,
-        } => chops_cli::explain::explain(&artifacts, &query, limit),
+        } => {
+            let cfg = Config::discover(&std::env::current_dir()?)?;
+            let dir = artifacts.unwrap_or(cfg.out);
+            chops_search_cli::explain::explain(&dir, &query, limit)
+        }
         Cmd::Eval {
             artifacts,
             queries,
@@ -135,14 +160,19 @@ fn main() -> Result<()> {
             fail_under,
             min_cos,
             chunk_penalty,
-        } => chops_cli::eval::eval(
-            &artifacts,
-            &queries,
-            kind.as_deref(),
-            fail_under,
-            min_cos,
-            chunk_penalty,
-        ),
+        } => {
+            let cfg = Config::discover(&std::env::current_dir()?)?;
+            let dir = artifacts.unwrap_or_else(|| cfg.out.clone());
+            let queries = queries.unwrap_or_else(|| cfg.root.join("fixtures/queries.toml"));
+            chops_search_cli::eval::eval(
+                &dir,
+                &queries,
+                kind.as_deref(),
+                fail_under,
+                min_cos,
+                chunk_penalty,
+            )
+        }
     }
 }
 
@@ -181,22 +211,15 @@ fn clean_artifacts(out: &Path) -> Result<()> {
     Ok(())
 }
 
-fn build(
-    content: &Path,
-    model_dir: &Path,
-    out: &Path,
-    prefix_rows: u32,
-    chunk_chars: usize,
-    dims: Option<usize>,
-) -> Result<()> {
+fn build(cfg: &Config, runtime: bool) -> Result<()> {
     // ---- 1. Load model -------------------------------------------------
-    let (tokens, mut rows, mut dim) = load_model2vec(model_dir)?;
+    let (tokens, mut rows, mut dim) = load_model2vec(&cfg.model)?;
     let n_rows = tokens.len();
     eprintln!("model: {n_rows} tokens × {dim} dims");
 
     // Optional PCA reduction. Must happen before anything downstream so
     // chunk vectors and browser-side query vectors live in the same space.
-    if let Some(k) = dims {
+    if let Some(k) = cfg.dims {
         if k == 0 || k > dim {
             bail!("--dims {k} out of range (model is {dim}-dimensional)");
         }
@@ -209,9 +232,9 @@ fn build(
     let vocab = Vocab::from_tokens(&tokens);
 
     // ---- 2. Load + chunk content ---------------------------------------
-    let posts = collect_posts(content)?;
+    let posts = collect_posts(&cfg.content)?;
     if posts.is_empty() {
-        bail!("no .md files found under {}", content.display());
+        bail!("no .md files found under {}", cfg.content.display());
     }
 
     struct ChunkRec {
@@ -255,19 +278,18 @@ fn build(
 
         // Keyword terms: word-level tokens (post-normalization,
         // pre-WordPiece). Tags weigh hardest, then title, then body.
+        // keyword_words only emits alphanumeric runs, so no filter here.
         let mut tf: HashMap<String, u16> = HashMap::new();
         let mut count_words = |text: &str, weight: u16| {
             let norm = Vocab::normalize(text);
             for w in keyword_words(&norm) {
-                if w.chars().any(|c| c.is_alphanumeric()) {
-                    let e = tf.entry(w.to_string()).or_insert(0);
-                    *e = e.saturating_add(weight);
-                }
+                let e = tf.entry(w.to_string()).or_insert(0);
+                *e = e.saturating_add(weight);
             }
         };
-        count_words(&title, TITLE_WEIGHT);
+        count_words(&title, cfg.title_weight);
         for tag in &fm.tags {
-            count_words(tag, TAG_WEIGHT);
+            count_words(tag, cfg.tag_weight);
         }
         count_words(&prose, 1);
         doc_words.push(tf);
@@ -281,7 +303,7 @@ fn build(
             head.push_str(tag);
         }
         let mut texts = vec![head];
-        texts.extend(chunk_prose(&prose, chunk_chars));
+        texts.extend(chunk_prose(&prose, cfg.chunk_chars));
 
         for text in &texts {
             let ids = vocab.tokenize(text);
@@ -296,7 +318,7 @@ fn build(
         docs.push(Doc { url, title });
     }
     if docs.is_empty() {
-        bail!("every page under {} was skipped", content.display());
+        bail!("every page under {} was skipped", cfg.content.display());
     }
     eprintln!(
         "content: {} docs indexed, {} chunks",
@@ -359,7 +381,9 @@ fn build(
     }
 
     // ---- 7. Serialize --------------------------------------------------
-    let prefix_rows = prefix_rows.min(n_rows as u32);
+    // Clamped: a config asking for more prefix rows than the model has
+    // would slice past the end of the row buffer below.
+    let prefix_rows = cfg.prefix_rows.min(n_rows as u32);
     let meta = ModelMeta {
         dim: u16::try_from(dim).context("dim exceeds u16")?,
         prefix_rows,
@@ -375,15 +399,15 @@ fn build(
         terms,
     };
 
-    fs::create_dir_all(out)?;
+    fs::create_dir_all(&cfg.out).with_context(|| format!("creating {}", cfg.out.display()))?;
     let rows_bytes: Vec<u8> = data_i8.iter().map(|&v| v as u8).collect();
     let prefix_bytes = &rows_bytes[..prefix_rows as usize * dim];
     let meta_out = meta.write();
     let index_out = index.write();
+    let snips_out = chops_search_core::snippet::write(&snip_texts);
 
-    let snips_out = chops_core::snippet::write(&snip_texts);
     let hash = build_hash(&[&meta_out, prefix_bytes, &rows_bytes, &index_out, &snips_out]);
-    clean_artifacts(out)?;
+    clean_artifacts(&cfg.out)?;
 
     let f_meta = format!("model.meta.{hash}.bin");
     let f_prefix = format!("model.prefix.{hash}.i8");
@@ -391,12 +415,12 @@ fn build(
     let f_index = format!("index.{hash}.bin");
     let f_snips = format!("snippets.{hash}.bin");
 
-    write_artifact(out, &f_meta, &meta_out, true)?;
-    write_artifact(out, &f_prefix, prefix_bytes, false)?;
-    write_artifact(out, &f_rows, &rows_bytes, false)?;
-    write_artifact(out, &f_index, &index_out, true)?;
+    write_artifact(&cfg.out, &f_meta, &meta_out, true)?;
+    write_artifact(&cfg.out, &f_prefix, prefix_bytes, false)?;
+    write_artifact(&cfg.out, &f_rows, &rows_bytes, false)?;
+    write_artifact(&cfg.out, &f_index, &index_out, true)?;
     // Range-served, so never gzipped — same reason as the rows file.
-    write_artifact(out, &f_snips, &snips_out, false)?;
+    write_artifact(&cfg.out, &f_snips, &snips_out, false)?;
 
     let manifest = serde_json::json!({
         "version": 1,
@@ -407,10 +431,16 @@ fn build(
         },
     });
     fs::write(
-        out.join("manifest.json"),
+        cfg.out.join("manifest.json"),
         serde_json::to_vec_pretty(&manifest)?,
     )?;
-    eprintln!("wrote {}/manifest.json (hash {hash})", out.display());
+    eprintln!("wrote {}/manifest.json (hash {hash})", cfg.out.display());
+
+    // After the manifest, so a half-written build never leaves a runtime
+    // pointing at artifacts that don't exist.
+    if runtime {
+        assets::write_runtime(&cfg.out)?;
+    }
     Ok(())
 }
 

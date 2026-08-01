@@ -3,6 +3,8 @@
 //! crate's internals are unreachable from tests/.
 
 pub mod artifacts;
+pub mod assets;
+pub mod config;
 pub mod eval;
 pub mod explain;
 pub mod frontmatter;
