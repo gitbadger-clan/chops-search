@@ -395,4 +395,12 @@ mod tests {
             .count();
         assert_eq!(n, PREFIX_MAX_EXPANSIONS);
     }
+
+    #[test]
+    fn keyword_words_splits_on_symbols() {
+        assert_eq!(keyword_words("25°c"), vec!["25", "c"]);
+        assert_eq!(keyword_words("a×b"), vec!["a", "b"]);
+        assert_eq!(keyword_words("hello world"), vec!["hello", "world"]);
+        assert!(keyword_words("...").is_empty());
+    }
 }
