@@ -43,13 +43,16 @@ const WASM_FILES: &[&str] = &["chops_search_wasm_bg.wasm", "chops_search_wasm.js
 fn main() {
     let mut args = std::env::args().skip(1);
     let task = args.next().unwrap_or_default();
-    let check = args.any(|a| a == "--check");
+    // Collect BEFORE inspecting: `any` consumes the iterator, which
+    // silently emptied `demo`'s arguments.
+    let rest: Vec<String> = args.collect();
 
     let result = match task.as_str() {
-        "assets" => assets(check),
+        "assets" => assets(rest.iter().any(|a| a == "--check")),
         "dist" => assets(false).and_then(|_| dist()),
+        "demo" => demo(&rest),
         _ => {
-            eprintln!("usage: cargo xtask <assets [--check] | dist>");
+            eprintln!("usage: cargo xtask <assets [--check] | dist | demo <args…>>");
             std::process::exit(2);
         }
     };
@@ -176,4 +179,21 @@ fn dist() -> Result<()> {
 
 fn rel(root: &Path, p: &Path) -> String {
     p.strip_prefix(root).unwrap_or(p).display().to_string()
+}
+
+/// Run the CLI against examples/demo-site from anywhere in the repo.
+/// `cargo xtask demo eval`, `cargo xtask demo build`, `cargo xtask demo
+/// docs -- ...` — the site path is the only thing this adds.
+fn demo(rest: &[String]) -> Result<()> {
+    let root = root();
+    let status = Command::new(env!("CARGO"))
+        .current_dir(&root)
+        .args(["run", "--release", "-p", "chops-search-cli", "--", "--site"])
+        .arg(root.join("examples/demo-site"))
+        .args(rest)
+        .status()?;
+    if !status.success() {
+        return Err("chops-search exited non-zero".into());
+    }
+    Ok(())
 }
