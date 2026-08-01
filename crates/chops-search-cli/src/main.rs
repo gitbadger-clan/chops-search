@@ -53,6 +53,28 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum ModelCmd {
+    /// Download a model2vec model and write the lockfile.
+    Fetch {
+        /// HuggingFace repo, e.g. minishlab/potion-base-8M.
+        #[arg(default_value = "minishlab/potion-base-8M")]
+        repo: String,
+        /// Exact revision to pin. Defaults to the current default branch,
+        /// resolved to a commit so the lock stays reproducible.
+        #[arg(long)]
+        revision: Option<String>,
+        /// Destination. Defaults to `model` from chops-search.toml.
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
+    /// Re-hash the model against its lockfile. No network.
+    Verify {
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
 enum Cmd {
     /// Build all search artifacts from a content tree and a model2vec model.
     Build {
@@ -115,6 +137,12 @@ enum Cmd {
         #[arg(long)]
         chunk_penalty: Option<f32>,
     },
+
+    /// Fetch or verify the embedding model.
+    Model {
+        #[command(subcommand)]
+        action: ModelCmd,
+    },
 }
 
 fn main() -> Result<()> {
@@ -172,6 +200,23 @@ fn main() -> Result<()> {
                 min_cos,
                 chunk_penalty,
             )
+        }
+        Cmd::Model { action } => {
+            let cfg = Config::discover(&std::env::current_dir()?)?;
+            match action {
+                ModelCmd::Fetch {
+                    repo,
+                    revision,
+                    dir,
+                } => chops_search_cli::model::fetch(
+                    &repo,
+                    revision.as_deref(),
+                    &dir.unwrap_or(cfg.model),
+                ),
+                ModelCmd::Verify { dir } => {
+                    chops_search_cli::model::verify(&dir.unwrap_or(cfg.model))
+                }
+            }
         }
     }
 }

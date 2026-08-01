@@ -72,3 +72,7 @@ Desktop.ini
 *.swo
 \#*\#
 .\#*
+
+/.chops-search/model/
+/target/
+/examples/demo-site/static/search/

@@ -8,5 +8,6 @@ pub mod config;
 pub mod eval;
 pub mod explain;
 pub mod frontmatter;
+pub mod model;
 pub mod model_loader;
 pub mod pca;
