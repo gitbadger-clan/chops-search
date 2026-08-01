@@ -1,6 +1,6 @@
-//! `chops eval` — score the engine against a labeled query set.
+//! `chops-search eval` — score the engine against a labeled query set.
 //!
-//! Deliberately drives `chops_core::engine::Engine` over the SAME byte
+//! Deliberately drives `chops_search_core::engine::Engine` over the SAME byte
 //! path the browser uses: construct from meta + index, ingest only the
 //! eager prefix, then per query plan() → slice the rows file → ingest()
 //! each range → search(). A reimplementation of the ranking here would
@@ -18,7 +18,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
-use chops_core::engine::Engine;
+use chops_search_core::engine::Engine;
 
 struct Case {
     q: String,
@@ -55,7 +55,7 @@ pub fn eval(
     let rows_bytes = fs::read(&a.rows).with_context(|| format!("{}", a.rows.display()))?;
 
     let mut engine = Engine::new(&meta_bytes, &index_bytes).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let mut opts = chops_core::score::ScoreOpts::default();
+    let mut opts = chops_search_core::score::ScoreOpts::default();
     if let Some(v) = min_cos {
         opts.min_cos = v;
     }
@@ -205,7 +205,7 @@ pub fn eval(
             for (i, u) in urls.iter().enumerate() {
                 println!("      {}. {u}", i + 1);
             }
-            println!("      explain: cargo run -p chops-cli --release -- query {q:?}");
+            println!("      explain: cargo run -p chops-search-cli --release -- query {q:?}");
         }
     }
 

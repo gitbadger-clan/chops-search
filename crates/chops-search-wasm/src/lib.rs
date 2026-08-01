@@ -1,6 +1,6 @@
 //! The wasm boundary. Rust decides, JS moves bytes.
 //!
-//! Everything here is a mechanical delegation to chops_core::engine —
+//! Everything here is a mechanical delegation to chops_search_core::engine —
 //! no logic, so there is nothing here that can drift from the build-time
 //! path. Note that wasm-bindgen copies &[u8] arguments into wasm memory
 //! on the way in; that's one copy per ingest, which at ~1.3 KB per query
@@ -9,7 +9,7 @@
 //! from JS — reconstructing the Uint8Array view on every write, because
 //! views detach whenever wasm memory grows.
 
-use chops_core::engine::Engine as CoreEngine;
+use chops_search_core::engine::Engine as CoreEngine;
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]

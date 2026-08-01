@@ -39,12 +39,12 @@
 
 /// Minimum raw best-chunk similarity for a document to be considered
 /// semantically relevant at all. Starting point from measured data:
-/// on-topic 0.29–0.45, pure noise ≤0.04. Sweep with `chops eval
+/// on-topic 0.29–0.45, pure noise ≤0.04. Sweep with `chops-search eval
 /// --min-cos` before treating this as settled.
 pub const MIN_COS: f32 = 0.20;
 
 /// Coefficient on the √(2 ln n) chunk-count correction. Sweep with
-/// `chops eval --chunk-penalty`; 0.0 disables the correction entirely.
+/// `chops-search eval --chunk-penalty`; 0.0 disables the correction entirely.
 pub const CHUNK_PENALTY: f32 = 0.02;
 
 #[derive(Debug, Clone, Copy)]

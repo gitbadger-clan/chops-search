@@ -1,5 +1,5 @@
 [package]
-name = "chops-core"
+name = "chops-search-core"
 version = "0.1.0"
 edition = "2021"
 description = "Pure engine: WordPiece, int8 row store, scoring, RRF, formats. No I/O."

@@ -1,7 +1,7 @@
-//! chops-core: the entire search engine as pure logic.
+//! chops-search-core: the entire search engine as pure logic.
 //!
 //! No filesystem, no network, no async. Compiles unchanged for the native
-//! build tool (chops-cli) and the browser blob (chops-wasm). Every
+//! build tool (chops-search-cli) and the browser blob (chops-search-wasm). Every
 //! decision that could silently produce a wrong vector — tokenization,
 //! quantization, unloaded-row handling — lives here, once.
 

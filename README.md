@@ -1,4 +1,4 @@
-# chops
+# chops-search
 
 Hybrid (keyword + semantic) search for a static site, running entirely in
 the browser. The "model" is a model2vec/potion int8 lookup table streamed
@@ -10,12 +10,12 @@ around lazy row loading (Pagefind-style) instead of one eager 4 MB blob.
 ## Layout
 
 ```
-crates/chops-core    pure engine: WordPiece, int8 row store, scoring,
+crates/chops-search-core    pure engine: WordPiece, int8 row store, scoring,
                       RRF, artifact formats. No I/O. Compiles to both
                       targets unchanged — the single-tokenizer guarantee
                       is structural, not aspirational.
-crates/chops-cli     `chops build`: model dir + content dir → artifacts
-crates/chops-wasm    wasm-bindgen wrapper: plan / ingest / search
+crates/chops-search-cli     `chops-search build`: model dir + content dir → artifacts
+crates/chops-search-wasm    wasm-bindgen wrapper: plan / ingest / search
 web/                  worker (byte pump) + page glue
 ```
 
@@ -29,7 +29,7 @@ web/                  worker (byte pump) + page glue
 | `index.bin`       | chunk vectors + docs + keyword postings | eager |
 
 \* Native potion-base-8M is 256-dim (~7.4 MB matrix). Pass `--dims 128` to
-match the article's ~3.8 MB: chops re-runs PCA on the token matrix at
+match the article's ~3.8 MB: chops-search re-runs PCA on the token matrix at
 build time (naive column truncation would be wrong — potion models are
 trained after model2vec's distillation-time PCA, so stored coordinates
 are no longer variance-ordered). Note the streaming design makes this
@@ -46,7 +46,7 @@ and per-query range sizes.
 huggingface-cli download minishlab/potion-base-8M \
     tokenizer.json model.safetensors config.json --local-dir model/
 
-cargo run -p chops-cli --release -- build \
+cargo run -p chops-search-cli --release -- build \
     --content ../site/content \
     --model model/ \
     --out ../site/static/search \
@@ -55,7 +55,7 @@ cargo run -p chops-cli --release -- build \
 
 # wasm blob (once per engine change, NOT per content change)
 cargo install wasm-pack   # or wasm-bindgen-cli + manual
-wasm-pack build crates/chops-wasm --target web --release \
+wasm-pack build crates/chops-search-wasm --target web --release \
     --out-dir ../../site/static/search/pkg
 # then: wasm-opt -Oz on the emitted .wasm if wasm-pack didn't already
 
@@ -111,24 +111,24 @@ Three gotchas that will otherwise eat an afternoon:
 - uses: actions/cache@v4
   with: { path: model/, key: potion-base-8M-v1 }
 - run: cargo test --workspace
-- run: cargo run -p chops-cli --release -- build
+- run: cargo run -p chops-search-cli --release -- build
        --content content --model model --out static/search
 # wasm build only when crates/ changed, or unconditionally if you prefer
 ```
 
 ## Invariants the tests pin down
 
-- **Parity with the official implementation.** `crates/chops-cli/tests/
-  model2vec_parity.rs` pushes fixture sentences through chops-core's
+- **Parity with the official implementation.** `crates/chops-search-cli/tests/
+  model2vec_parity.rs` pushes fixture sentences through chops-search-core's
   tokenizer + embedding AND MinishLab's official `model2vec-rs` crate,
   asserting cosine > 0.9999 per input (plus agreement on which inputs
   embed to nothing). model2vec-rs is a dev-dependency only — it pulls the
-  HF `tokenizers` crate, which is exactly what chops-core exists to avoid
+  HF `tokenizers` crate, which is exactly what chops-search-core exists to avoid
   shipping to wasm. The browser must run our tokenizer, so build time
   runs it too; the oracle proves ours matches theirs. Needs model files:
 
   ```fish
-  CHOPS_MODEL_DIR=model cargo test -p chops-cli -- --ignored
+  CHOPS_SEARCH_MODEL_DIR=model cargo test -p chops-search-cli -- --ignored
   ```
 
 - No `[CLS]`/`[SEP]`; unknown words are **deleted**, never `[UNK]`-ed;
@@ -150,7 +150,7 @@ Three gotchas that will otherwise eat an afternoon:
   feature-detected dual builds or accept the Safari 16.4 floor.
 - **Zero-copy ingest** — wasm-bindgen copies `&[u8]` once on the way in;
   fine at 1.3 KB/query. The pointer-into-linear-memory path is sketched in
-  `chops-wasm/src/lib.rs` comments if it ever matters.
+  `chops-search-wasm/src/lib.rs` comments if it ever matters.
 - **Snippets in results** — `index.bin` has room; add a `str16` per chunk
   and a best-chunk id per result.
 - **Eval harness** — port the thirty labeled queries + recall@1 idea

@@ -27,7 +27,7 @@ pub struct Artifacts {
 
 /// Read `manifest.json` from an artifacts directory. Falls back to the
 /// pre-hashing filenames when no manifest exists, so an old build
-/// directory still works with `chops query` without a rebuild.
+/// directory still works with `chops-search query` without a rebuild.
 pub fn resolve(dir: &Path) -> Result<Artifacts> {
     let manifest_path = dir.join("manifest.json");
     if !manifest_path.exists() {
@@ -43,7 +43,7 @@ pub fn resolve(dir: &Path) -> Result<Artifacts> {
             return Ok(legacy);
         }
         anyhow::bail!(
-            "no manifest.json and no legacy artifacts in {} — run `chops build` first",
+            "no manifest.json and no legacy artifacts in {} — run `chops-search build` first",
             dir.display()
         );
     }

@@ -2,10 +2,10 @@
 //! would fetch, driven through the same plan → ingest → search surface
 //! the worker uses.
 
-use chops_core::builder::{embed_f32, quantize_global, quantize_rows};
-use chops_core::engine::Engine;
-use chops_core::format::{Doc, Index, ModelMeta};
-use chops_core::wordpiece::Vocab;
+use chops_search_core::builder::{embed_f32, quantize_global, quantize_rows};
+use chops_search_core::engine::Engine;
+use chops_search_core::format::{Doc, Index, ModelMeta};
+use chops_search_core::wordpiece::Vocab;
 
 const DIM: usize = 4;
 
@@ -149,9 +149,9 @@ fn quantization_fidelity_query_vs_f32() {
     // int8 path through the public engine: use plan/ingest already done,
     // then compare rankings as a proxy plus direct cosine via store-level
     // math re-derived from artifacts.
-    let m = chops_core::format::ModelMeta::read(&meta).unwrap();
+    let m = chops_search_core::format::ModelMeta::read(&meta).unwrap();
     let mut store =
-        chops_core::store::RowStore::new(DIM, m.tokens.len(), m.scales.clone());
+        chops_search_core::store::RowStore::new(DIM, m.tokens.len(), m.scales.clone());
     store.ingest(0, &rows_file).unwrap();
     let q_vec = store.embed(&ids).unwrap();
 

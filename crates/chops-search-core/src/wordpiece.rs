@@ -22,7 +22,7 @@
 //! only, while `is_combining_mark` also covers Mc and Me. Indic spacing
 //! marks (Devanagari matras) and the Hangul tone marks U+302E/U+302F are
 //! therefore dropped where HF keeps them — where HF would fuse them into
-//! the word and delete the whole word as untokenizable, chops keeps the
+//! the word and delete the whole word as untokenizable, chops-search keeps the
 //! base characters. Fixing it needs an Mn-only category table in the wasm
 //! blob; the parity survey reports the gap instead of hiding it.
 
@@ -30,7 +30,7 @@ use std::collections::HashMap;
 use unicode_normalization::char::is_combining_mark;
 use unicode_normalization::UnicodeNormalization;
 /// HF WordPiece refuses words longer than this, emitting [UNK] without
-/// attempting to segment. Since chops deletes rather than [UNK]s, the
+/// attempting to segment. Since chops-search deletes rather than [UNK]s, the
 /// equivalent is returning None. Value is potion's
 /// `model.max_input_chars_per_word`; not read from the JSON because Vocab
 /// is built from a token list, not the file.

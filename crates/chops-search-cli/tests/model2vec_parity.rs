@@ -1,6 +1,6 @@
 //! Golden parity against MinishLab's official model2vec-rs implementation.
 //!
-//! This is the test that upgrades chops-core's tokenizer + embedding from
+//! This is the test that upgrades chops-search-core's tokenizer + embedding from
 //! "three gotchas transcribed from a blog post" to "verified against the
 //! reference". If it passes, the browser-side query vectors are the same
 //! vectors the official inference engine would produce.
@@ -10,13 +10,13 @@
 //!
 //!   huggingface-cli download minishlab/potion-base-8M \
 //!       tokenizer.json model.safetensors config.json --local-dir model/
-//!   CHOPS_MODEL_DIR=model cargo test -p chops-cli -- --ignored
+//!   CHOPS_SEARCH_MODEL_DIR=model cargo test -p chops-search-cli -- --ignored
 //!
 //! (config.json is needed by model2vec-rs's loader, not by chops itself.)
 
-use chops_cli::model_loader::load_model2vec;
-use chops_core::builder::embed_f32;
-use chops_core::wordpiece::Vocab;
+use chops_search_cli::model_loader::load_model2vec;
+use chops_search_core::builder::embed_f32;
+use chops_search_core::wordpiece::Vocab;
 use model2vec_rs::model::StaticModel;
 
 /// Sentences chosen to exercise every behavior that could diverge:
@@ -44,13 +44,13 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 }
 
 #[test]
-#[ignore = "needs model files; set CHOPS_MODEL_DIR and run with --ignored"]
+#[ignore = "needs model files; set CHOPS_SEARCH_MODEL_DIR and run with --ignored"]
 fn embeddings_match_official_implementation() {
-    let dir = std::env::var("CHOPS_MODEL_DIR")
-        .expect("set CHOPS_MODEL_DIR to a dir with tokenizer.json + model.safetensors + config.json");
+    let dir = std::env::var("CHOPS_SEARCH_MODEL_DIR")
+        .expect("set CHOPS_SEARCH_MODEL_DIR to a dir with tokenizer.json + model.safetensors + config.json");
 
-    // Our path: the exact code the browser runs (chops-core), fed by the
-    // exact loader the build tool runs (chops-cli).
+    // Our path: the exact code the browser runs (chops-search-core), fed by the
+    // exact loader the build tool runs (chops-search-cli).
     let (tokens, rows, dim) =
         load_model2vec(dir.as_ref()).expect("chops loader failed");
     let vocab = Vocab::from_tokens(&tokens);
@@ -92,9 +92,9 @@ fn embeddings_match_official_implementation() {
 /// Same oracle, sharper lens: per-sentence cosine is forgiving of a single
 /// wrong token in a long sentence. Short inputs isolate the tokenizer.
 #[test]
-#[ignore = "needs model files; set CHOPS_MODEL_DIR and run with --ignored"]
+#[ignore = "needs model files; set CHOPS_SEARCH_MODEL_DIR and run with --ignored"]
 fn single_words_match_official_implementation() {
-    let dir = std::env::var("CHOPS_MODEL_DIR").expect("set CHOPS_MODEL_DIR");
+    let dir = std::env::var("CHOPS_SEARCH_MODEL_DIR").expect("set CHOPS_SEARCH_MODEL_DIR");
     let (tokens, rows, dim) = load_model2vec(dir.as_ref()).expect("load");
     let vocab = Vocab::from_tokens(&tokens);
     let official =

@@ -111,7 +111,7 @@ impl KeywordIndex {
         ((n - df + 0.5) / (df + 0.5) + 1.0).ln()
     }
 
-    /// One term's contribution to one document. Exposed so `chops query`
+    /// One term's contribution to one document. Exposed so `chops-search query`
     /// reports the same numbers the ranker used — the duplicated formula
     /// in explain.rs drifted once already when BM25 landed.
     pub fn term_score(&self, doc: u16, tf: u16, idf: f32) -> f32 {

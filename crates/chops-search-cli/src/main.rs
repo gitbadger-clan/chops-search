@@ -1,22 +1,24 @@
-//! chops build — turn a model2vec model + a Zola content tree into the
-//! four static artifacts the browser engine consumes:
+//! chops-search build — turn a model2vec model + a Zola content tree into
+//! the five static artifacts the browser engine consumes:
 //!
-//!   search/model.meta.bin   vocab + per-row scales (eager, complete)
-//!   search/model.prefix.i8  top-frequency rows (eager)
-//!   search/model.rows.i8    full matrix, frequency-ordered (range-fetched)
-//!   search/index.bin        chunk vectors + docs + keyword postings (eager)
+//!   model.meta.<hash>.bin    vocab + per-row scales (eager, complete)
+//!   model.prefix.<hash>.i8   top-frequency rows (eager)
+//!   model.rows.<hash>.i8     full matrix, frequency-ordered (range-fetched)
+//!   index.<hash>.bin         chunk vectors + docs + keyword postings (eager)
+//!   snippets.<hash>.bin      per-chunk display text (range-fetched)
+//!
+//! plus manifest.json (the only unhashed artifact, and the only one that
+//! revalidates) and the runtime — wasm, glue, worker, page script, CSS —
+//! written from bytes embedded in this binary unless --no-runtime.
+//!
+//! Paths and tuning come from chops-search.toml, discovered by walking up
+//! from the working directory; flags override it. See config.rs.
 //!
 //! Expects a local model directory containing `tokenizer.json` and
 //! `model.safetensors` (e.g. `hf download minishlab/potion-base-8M
-//! --local-dir model/`). No network access here; fetching the model is
-//! your job, deliberately.
-//!
-//! Front matter is parsed for real (see chops_cli::frontmatter): drafts
-//! and `in_search_index = false` pages are skipped, `slug`/`path`
-//! overrides and Zola's path slugification shape URLs, and tags feed both
-//! ranking sides — as high-weight keyword terms, and inside a synthetic
-//! title+tags chunk so the semantic side finally sees titles at all
-//! (body chunks alone never contain them).
+//! --local-dir .chops-search/model`). No network access here; fetching the
+//! model is deliberately a separate step, so a build can never fail
+//! because an upstream repo moved.
 
 use std::collections::HashMap;
 use std::fs;
@@ -27,27 +29,24 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use sha2::{Digest, Sha256};
 
-use chops_cli::frontmatter::{self, FrontMatter};
-use chops_cli::model_loader::load_model2vec;
-use chops_cli::pca::pca_reduce;
-use chops_core::builder::{
+use chops_search_cli::assets;
+use chops_search_cli::config::Config;
+use chops_search_cli::frontmatter::{self, FrontMatter};
+use chops_search_cli::model_loader::load_model2vec;
+use chops_search_cli::pca::pca_reduce;
+use chops_search_core::builder::{
     embed_f32, frequency_permutation, permute_rows_f32, quantize_global, quantize_rows,
 };
-use chops_core::chunk::{chunk_prose, prepare_markdown};
-use chops_core::format::{Doc, Index, ModelMeta};
-use chops_core::keyword::keyword_words;
-use chops_core::wordpiece::Vocab;
-
-/// Extra term-frequency weight for title words (a title mention counts
-/// like this many body mentions) and for tag words. Tags are weighted
-/// hardest: they're the author's hand-curated statement of what the page
-/// is about, and a 4-doc corpus already showed the cost of ignoring them
-/// ("chaos" lived only in a tag and matched nothing).
-const TITLE_WEIGHT: u16 = 2;
-const TAG_WEIGHT: u16 = 4;
+use chops_search_core::chunk::{chunk_prose, prepare_markdown};
+use chops_search_core::format::{Doc, Index, ModelMeta};
+use chops_search_core::keyword::keyword_words;
+use chops_search_core::wordpiece::Vocab;
 
 #[derive(Parser)]
-#[command(name = "chops", about = "Static-site hybrid search index builder")]
+#[command(
+    name = "chops-search",
+    about = "Static-site hybrid search index builder"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,

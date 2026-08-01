@@ -1,12 +1,12 @@
-//! `chops query` — explain a query against built artifacts.
+//! `chops-search query` — explain a query against built artifacts.
 //!
 //! Loads the same four artifacts the browser fetches, runs the identical
-//! chops-core surface natively, and prints the evidence behind the final
+//! chops-search-core surface natively, and prints the evidence behind the final
 //! ranking: keyword scores (recomputed with the same formula), best-chunk
 //! cosine + chunk count per doc, and each engine's RRF contribution.
 //!
 //! The keyword-score and RRF-contribution math is duplicated from
-//! chops-core here because the core deliberately discards scores after
+//! chops-search-core here because the core deliberately discards scores after
 //! ranking; if either formula ever changes in core, change it here too.
 
 use std::collections::HashMap;
@@ -14,12 +14,12 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use chops_core::format::{Index, ModelMeta};
-use chops_core::keyword::keyword_words;
-use chops_core::rrf;
-use chops_core::score;
-use chops_core::store::RowStore;
-use chops_core::wordpiece::Vocab;
+use chops_search_core::format::{Index, ModelMeta};
+use chops_search_core::keyword::keyword_words;
+use chops_search_core::rrf;
+use chops_search_core::score;
+use chops_search_core::store::RowStore;
+use chops_search_core::wordpiece::Vocab;
 
 pub fn explain(artifacts: &Path, query: &str, limit: usize) -> Result<()> {
     // ---- Load exactly what the browser would ---------------------------

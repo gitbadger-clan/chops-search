@@ -12,7 +12,7 @@
 //! that looked thorough.
 //!
 //! The one transformation applied to the reference output is dropping
-//! [UNK] ids: HF emits [UNK] for an untokenizable word, chops deletes the
+//! [UNK] ids: HF emits [UNK] for an untokenizable word, chops_search deletes the
 //! word (gotcha 2 in wordpiece.rs). Filtering [UNK] from HF's ids is
 //! therefore the definition of agreement, and it doubles as a check that
 //! deletion happens at word granularity rather than piece granularity.
@@ -21,18 +21,18 @@
 //!
 //!   hf download minishlab/potion-base-8M tokenizer.json \
 //!       --local-dir model/
-//!   CHOPS_MODEL_DIR=model cargo test -p chops-cli --test tokenizer_parity -- --ignored
+//!   CHOPS_SEARCH_MODEL_DIR=model cargo test -p chops-search-cli --test tokenizer_parity -- --ignored
 
-use chops_core::wordpiece::Vocab;
+use chops_search_core::wordpiece::Vocab;
 use tokenizers::Tokenizer;
 
 fn load() -> (Tokenizer, Vocab, u32) {
-    let dir = std::env::var("CHOPS_MODEL_DIR")
-        .expect("set CHOPS_MODEL_DIR to a directory containing tokenizer.json");
+    let dir = std::env::var("CHOPS_SEARCH_MODEL_DIR")
+        .expect("set CHOPS_SEARCH_MODEL_DIR to a directory containing tokenizer.json");
     let tk = Tokenizer::from_file(format!("{dir}/tokenizer.json")).expect("tokenizer.json");
     let unk = tk.token_to_id("[UNK]").expect("vocab has no [UNK]");
 
-    // Rebuild chops's vocab from the same file, ordered by id so index ==
+    // Rebuild chops-search's vocab from the same file, ordered by id so index ==
     // row. Uses the tokenizer's own vocab rather than the safetensors
     // loader: this test is about tokenization, not about the matrix.
     let vocab_map = tk.get_vocab(false);
@@ -44,7 +44,7 @@ fn load() -> (Tokenizer, Vocab, u32) {
     (tk, vocab, unk)
 }
 
-/// Reference ids with [UNK] removed — the sequence chops must reproduce.
+/// Reference ids with [UNK] removed — the sequence chops-search must reproduce.
 fn reference(tk: &Tokenizer, unk: u32, s: &str) -> Vec<u32> {
     tk.encode(s, false)
         .expect("encode")
@@ -108,7 +108,7 @@ const CASES: &[&str] = &[
 ];
 
 #[test]
-#[ignore = "needs tokenizer.json; set CHOPS_MODEL_DIR and run with --ignored"]
+#[ignore = "needs tokenizer.json; set CHOPS_SEARCH_MODEL_DIR and run with --ignored"]
 fn exact_ids_match_reference() {
     let (tk, vocab, unk) = load();
     let mut failures = Vec::new();
@@ -131,7 +131,7 @@ fn exact_ids_match_reference() {
     );
 }
 
-/// Codepoint ranges chops claims exact parity over. A char is probed both
+/// Codepoint ranges chops-search claims exact parity over. A char is probed both
 /// standalone and embedded between letters, because the two exercise
 /// different rules: standalone catches misclassification, embedded catches
 /// word-boundary errors.
@@ -148,18 +148,18 @@ const CLAIMED: &[(u32, u32, &str)] = &[
     (0x20000, 0x20080, "CJK Extension B (sample)"),
 ];
 
-/// Codepoints where chops knowingly diverges (see wordpiece.rs header).
+/// Codepoints where chops-search knowingly diverges (see wordpiece.rs header).
 /// Listing them keeps the sweep honest: a new divergence still fails.
 ///
 /// U+302E/U+302F are Hangul tone marks, category Mc. BERT's strip_accents
-/// removes Mn only; `is_combining_mark` also covers Mc, so chops drops
+/// removes Mn only; `is_combining_mark` also covers Mc, so chops-search drops
 /// them and keeps the surrounding letters where HF fuses them into the
 /// word and deletes the whole word. Fixing it needs an Mn-only category
 /// table in the wasm blob.
 const KNOWN_GAPS: &[u32] = &[0x302E, 0x302F];
 
 #[test]
-#[ignore = "needs tokenizer.json; set CHOPS_MODEL_DIR and run with --ignored"]
+#[ignore = "needs tokenizer.json; set CHOPS_SEARCH_MODEL_DIR and run with --ignored"]
 fn codepoint_sweep_over_claimed_ranges() {
     let (tk, vocab, unk) = load();
     let mut diverged: Vec<(char, &str, String)> = Vec::new();
@@ -198,11 +198,11 @@ fn codepoint_sweep_over_claimed_ranges() {
 /// Not an assertion — a map of where parity ends. Run it when extending
 /// the punctuation table or before claiming support for a new script:
 ///
-///   CHOPS_MODEL_DIR=model cargo test -p chops-cli --test tokenizer_parity \
+///   CHOPS_SEARCH_MODEL_DIR=model cargo test -p chops-search-cli --test tokenizer_parity \
 ///       -- --ignored survey --nocapture
 ///
 /// Expected known gaps: Indic spacing marks (Mc), which BERT keeps and
-/// chops strips along with Mn.
+/// chops-search strips along with Mn.
 #[test]
 #[ignore = "survey, not an assertion; run explicitly with --nocapture"]
 fn survey_full_bmp() {
@@ -242,7 +242,7 @@ fn survey_full_bmp() {
 }
 
 #[test]
-#[ignore = "needs tokenizer.json; set CHOPS_MODEL_DIR and run with --ignored"]
+#[ignore = "needs tokenizer.json; set CHOPS_SEARCH_MODEL_DIR and run with --ignored"]
 fn overlong_words_match_reference() {
     let (tk, vocab, unk) = load();
     for n in [99usize, 100, 101, 150] {

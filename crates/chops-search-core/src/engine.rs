@@ -1,4 +1,4 @@
-//! The plan / ingest / search surface. chops-wasm wraps this 1:1;
+//! The plan / ingest / search surface. chops-search-wasm wraps this 1:1;
 //! integration tests drive it natively with the exact bytes the browser
 //! would see.
 //!

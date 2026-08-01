@@ -1,6 +1,6 @@
 //! TOML front matter, parsed for real (fix #1).
 //!
-//! The hand-rolled `title = "..."` scan in chops-core::chunk was fine for
+//! The hand-rolled `title = "..."` scan in chops-search-core::chunk was fine for
 //! title extraction and wrong for everything else: it couldn't see
 //! `draft`, `in_search_index`, `slug`, `path`, or tags, so drafts got
 //! indexed, opted-out pages got indexed, override'd URLs 404'd, and the

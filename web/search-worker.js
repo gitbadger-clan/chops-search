@@ -55,12 +55,12 @@ async function boot() {
   // Dynamic import so the glue URL can carry the build hash — a static
   // top-level import is fetched before any of our code runs, which would
   // leave the engine on a revalidate-only cache policy.
-  const glue = await import(`./pkg/chops_wasm.js?v=${hash}`);
+  const glue = await import(`./pkg/chops_search_wasm.js?v=${hash}`);
   const initWasm = glue.default;
   const Engine = glue.Engine;
 
   const [, meta, index, prefix] = await Promise.all([
-    initWasm({ module_or_path: `${base}/pkg/chops_wasm_bg.wasm?v=${hash}` }),
+    initWasm({ module_or_path: `${base}/pkg/chops_search_wasm_bg.wasm?v=${hash}` }),
     fetchEager(`${base}/${files.meta}`),
     fetchEager(`${base}/${files.index}`),
     fetchBytes(`${base}/${files.prefix}`),
@@ -105,7 +105,11 @@ async function openRowCache(hash) {
   try {
     const cache = await caches.open(name);
     for (const k of await caches.keys()) {
-      if (k.startsWith('chops-rows-') && k !== name) await caches.delete(k);
+      // The `chops-rows-` prefix predates the rename; sweep it too so old
+      // caches don't linger forever. Safe to drop after a few deploys.
+      if ((k.startsWith('chops-search-rows-') || k.startsWith('chops-rows-')) && k !== name) {
+        await caches.delete(k);
+      }
     }
     return cache;
   } catch {
