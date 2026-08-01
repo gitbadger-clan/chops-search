@@ -171,8 +171,10 @@ fn clean_artifacts(out: &Path) -> Result<()> {
     for entry in fs::read_dir(out)? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        let stale =
-            name.starts_with("model.") || name.starts_with("index.") || name == "manifest.json";
+        let stale = name.starts_with("model.")
+            || name.starts_with("index.")
+            || name.starts_with("snippets.")
+            || name == "manifest.json";
         if stale && entry.path().is_file() {
             fs::remove_file(entry.path())?;
         }
@@ -216,6 +218,7 @@ fn build(
     struct ChunkRec {
         doc: u16,
         ids: Vec<u32>, // token ids under the ORIGINAL vocab order
+        text: String,  // display text for snippets.bin
     }
     let mut chunks: Vec<ChunkRec> = Vec::new();
     let mut docs: Vec<Doc> = Vec::new();
@@ -284,7 +287,11 @@ fn build(
         for text in &texts {
             let ids = vocab.tokenize(text);
             if !ids.is_empty() {
-                chunks.push(ChunkRec { doc: doc_id, ids });
+                chunks.push(ChunkRec {
+                    doc: doc_id,
+                    ids,
+                    text: text.trim().to_string(),
+                });
             }
         }
         docs.push(Doc { url, title });
@@ -320,12 +327,15 @@ fn build(
     // ---- 4. Embed chunks against the f32 table ------------------------
     let mut chunk_vecs_f32 = Vec::with_capacity(chunks.len() * dim);
     let mut chunk_doc = Vec::with_capacity(chunks.len());
+    let mut snip_texts: Vec<String> = Vec::with_capacity(chunks.len());
     for c in &chunks {
         // ids are non-empty by construction → embed only returns None for
-        // a zero-norm mean, which we skip rather than ship.
+        // a zero-norm mean, which we skip rather than ship. Snippets are
+        // appended in the SAME branch so chunk ids index both arrays.
         if let Some(v) = embed_f32(&c.ids, &rows, dim) {
             chunk_vecs_f32.extend(v);
             chunk_doc.push(c.doc);
+            snip_texts.push(c.text.clone());
         }
     }
     let (chunk_vecs, global_scale) = quantize_global(&chunk_vecs_f32);
@@ -372,23 +382,30 @@ fn build(
     let meta_out = meta.write();
     let index_out = index.write();
 
-    let hash = build_hash(&[&meta_out, prefix_bytes, &rows_bytes, &index_out]);
+    let snips_out = chops_core::snippet::write(&snip_texts);
+    let hash = build_hash(&[&meta_out, prefix_bytes, &rows_bytes, &index_out, &snips_out]);
     clean_artifacts(out)?;
 
     let f_meta = format!("model.meta.{hash}.bin");
     let f_prefix = format!("model.prefix.{hash}.i8");
     let f_rows = format!("model.rows.{hash}.i8");
     let f_index = format!("index.{hash}.bin");
+    let f_snips = format!("snippets.{hash}.bin");
 
     write_artifact(out, &f_meta, &meta_out, true)?;
     write_artifact(out, &f_prefix, prefix_bytes, false)?;
     write_artifact(out, &f_rows, &rows_bytes, false)?;
     write_artifact(out, &f_index, &index_out, true)?;
+    // Range-served, so never gzipped — same reason as the rows file.
+    write_artifact(out, &f_snips, &snips_out, false)?;
 
     let manifest = serde_json::json!({
         "version": 1,
         "hash": hash,
-        "files": { "meta": f_meta, "prefix": f_prefix, "rows": f_rows, "index": f_index },
+        "files": {
+            "meta": f_meta, "prefix": f_prefix, "rows": f_rows,
+            "index": f_index, "snippets": f_snips,
+        },
     });
     fs::write(
         out.join("manifest.json"),
