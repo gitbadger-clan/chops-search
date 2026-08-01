@@ -1,4 +1,4 @@
-// Page-side glue for chops. Changes from v2: renders snippets.
+// Page-side glue for chops-search. Changes from v2: renders snippets.
 //
 // Snippets arrive as a SECOND message after the results, so the list
 // renders immediately and then fills in — same progressive pattern as
@@ -72,7 +72,7 @@ function boot() {
       applySnippets(msg.snippets);
     } else if (msg.type === 'error') {
       if (!ready) fail(msg.message);
-      else console.warn('chops:', msg.message);
+      else console.warn('chops-search:', msg.message);
     }
   };
   worker.postMessage({ type: 'init', base: '/search' });
@@ -80,7 +80,7 @@ function boot() {
 
 function fail(message) {
   failed = true;
-  console.warn('chops: search unavailable —', message);
+  console.warn('chops-search: search unavailable —', message);
   if (modeEl) modeEl.textContent = 'search unavailable';
   if (resultsEl) resultsEl.replaceChildren();
   rows = [];
@@ -100,7 +100,7 @@ function render(results, semantic, queryText) {
     // Placeholder for the snippet pass; stays empty if snippets never
     // arrive, so nothing shifts when they don't.
     const snipEl = document.createElement('p');
-    snipEl.className = 'chops-snippet';
+    snipEl.className = 'chops-search-snippet';
     li.appendChild(snipEl);
     return { li, snipEl };
   });
