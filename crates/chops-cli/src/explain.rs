@@ -46,10 +46,7 @@ pub fn explain(artifacts: &Path, query: &str, limit: usize) -> Result<()> {
 
     // ---- Tokenization report (both pipelines) --------------------------
     let norm = Vocab::normalize(query);
-    let words: Vec<&str> = keyword_words(&norm)
-        .into_iter()
-        .filter(|w| w.chars().any(|c| c.is_alphanumeric()))
-        .collect();
+    let words: Vec<&str> = keyword_words(&norm).into_iter().collect();
     let ids = vocab.tokenize(query);
     println!("query:     {query:?}");
     println!("kw words:  {words:?}");
