@@ -1,0 +1,10 @@
+# Demo site: a real Zola layout, used by CI as the end-to-end test.
+# `zola serve` works here too, which makes it the integration test for
+# the whole install path.
+content = "content"
+out     = "static/search"
+
+# One model copy serves the parity tests and this build.
+model = "../../.chops-search/model"
+
+dims = 128   # halves the prefix and per-query ranges; the payload story

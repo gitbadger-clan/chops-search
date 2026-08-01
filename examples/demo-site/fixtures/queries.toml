@@ -1,0 +1,146 @@
+# Labeled queries over the fixture corpus (search/posts/make-fixtures.py).
+#
+# `expect` is a list of URLs any of which counts as a correct top-1 hit —
+# URLs rather than doc ids, because ids shift whenever a page is added or
+# skipped. `kind` follows the three-way split from Bart de Goede's
+# benchmark, because the whole point of a hybrid engine is that the kinds
+# fail differently:
+#
+#   exact       literal rare terms are present; keyword should carry this
+#               and MUST NOT be lost when semantics disagrees
+#   paraphrase  the answer uses different words than the query; semantics
+#               carries this, keyword scores ~nothing
+#   navigational  the user knows the page and is typing toward it
+#
+# A hybrid engine that scores well on `exact` and badly on `paraphrase` is
+# just keyword search with extra bytes; the reverse means the vectors are
+# drowning out signal that was sitting right there in the text.
+
+# ---------------------------------------------------------------- exact
+[[query]]
+q = "chromedp iframes"
+expect = ["/posts/using-go-chromedp/"]
+kind = "exact"
+
+[[query]]
+q = "chromiumoxide"
+expect = ["/posts/rusty-puppets/"]
+kind = "exact"
+
+[[query]]
+q = "copier yaml jinja extensions"
+expect = ["/posts/multi-project-boilerplates/"]
+kind = "exact"
+
+[[query]]
+q = "qdrant docker compose"
+expect = ["/posts/qdrant-streamlit-openai-rag/"]
+kind = "exact"
+
+[[query]]
+q = "ravif avif encoder"
+expect = ["/posts/seo-freak-why-optimize-images/"]
+kind = "exact"
+
+[[query]]
+q = "x11vnc novnc websockify"
+expect = ["/posts/chrome-container/"]
+kind = "exact"
+
+[[query]]
+q = "reference class forecasting"
+expect = ["/posts/why-you-need-boring-estimates/"]
+kind = "exact"
+
+[[query]]
+q = "cargo cult"
+# Buried mid-document in a long, topically incoherent page: the
+# needle-in-a-haystack case that windowed scorers get wrong.
+expect = ["/posts/til/"]
+kind = "exact"
+
+[[query]]
+q = "supervisord fluxbox xvfb"
+expect = ["/posts/chrome-container/"]
+kind = "exact"
+
+# ----------------------------------------------------------- paraphrase
+[[query]]
+q = "how long will this project take"
+expect = ["/posts/why-you-need-boring-estimates/"]
+kind = "paraphrase"
+
+[[query]]
+q = "watch the browser while it scrapes"
+expect = ["/posts/chrome-container/"]
+kind = "paraphrase"
+
+[[query]]
+q = "make my pages load faster"
+expect = ["/posts/seo-freak-why-optimize-images/"]
+kind = "paraphrase"
+
+[[query]]
+q = "start a new project from a skeleton"
+expect = ["/posts/multi-project-boilerplates/"]
+kind = "paraphrase"
+
+[[query]]
+q = "ask questions about my own documents"
+expect = ["/posts/qdrant-streamlit-openai-rag/"]
+kind = "paraphrase"
+
+[[query]]
+q = "controlling a headless browser from rust"
+expect = ["/posts/rusty-puppets/", "/posts/chrome-container/"]
+kind = "paraphrase"
+
+[[query]]
+q = "browser automation in a compiled language"
+expect = ["/posts/using-go-chromedp/", "/posts/rusty-puppets/"]
+kind = "paraphrase"
+
+[[query]]
+q = "shrinking pictures to save bandwidth"
+expect = ["/posts/seo-freak-why-optimize-images/"]
+kind = "paraphrase"
+
+# --------------------------------------------------------- navigational
+[[query]]
+q = "about"
+expect = ["/posts/about/"]
+kind = "navigational"
+
+[[query]]
+q = "today i learned"
+expect = ["/posts/til/"]
+kind = "navigational"
+
+[[query]]
+q = "estimates"
+expect = ["/posts/why-you-need-boring-estimates/"]
+kind = "navigational"
+
+# ----------------------------------------------------- negative control
+# No document answers this. The correct behavior is an EMPTY result list
+# once a relevance floor exists; today every doc is returned in noise
+# order, which is why `expect = []` currently fails by design.
+[[query]]
+q = "sourdough starter hydration"
+expect = []
+kind = "negative"
+
+[[query]]
+q = "making a file of an exact size on the command line"
+expect = ["/posts/til/"]
+kind = "paraphrase"
+
+[[query]]
+q = "seeing what a hidden browser session is doing"
+expect = ["/posts/chrome-container/"]
+kind = "paraphrase"
+
+[[query]]
+q = "smaller container images for arm macs"
+expect = ["/posts/chrome-container/"]
+kind = "paraphrase"

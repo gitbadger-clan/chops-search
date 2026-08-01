@@ -1,0 +1,8 @@
+base_url = "http://127.0.0.1:1111"
+title = "chops-search demo"
+compile_sass = false
+build_search_index = false   # chops-search replaces Zola's elasticlunr
+take_screenshot = false
+
+[markdown]
+highlight_code = true
