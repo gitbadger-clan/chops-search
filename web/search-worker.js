@@ -10,6 +10,12 @@
 // version-skew hole where a cached old engine meets fresh artifacts.
 // manifest.json and this file are the only things that revalidate.
 //
+// PERSISTENT ROW CACHE. Browsers largely don't reuse 206 responses from
+// the HTTP cache across navigations, so every page load started cold and
+// re-fetched ranges the user already had. A Cache API layer keyed on the
+// build hash makes warmth persist across sessions; a rebuild changes the
+// hash, so stale rows can never pair with a fresh index.
+//
 // Protocol (postMessage):
 //   in : { type: 'init', base }            base = '/search'
 //   in : { type: 'query', q, gen, limit }  gen = monotonically increasing
@@ -19,8 +25,14 @@
 
 let engine = null;
 let base = '/search';
+let files = null;
 let latestGen = 0;
 let rowCache = null;
+
+// Chrome 80+, Firefox 113+, Safari 16.4+. Where it's missing we fetch the
+// uncompressed artifact instead of failing to boot — `chops build` emits
+// both, so the fallback costs bandwidth on old browsers and nothing else.
+const CAN_DECOMPRESS = typeof DecompressionStream !== 'undefined';
 
 self.onmessage = async (ev) => {
   const msg = ev.data;
@@ -69,6 +81,28 @@ async function boot() {
 
   engine = new Engine(meta, index);
   engine.ingest(0, prefix);
+
+  rowCache = await openRowCache(hash);
+}
+
+/// Cache keyed on the build hash. Old builds' caches are dropped, so this
+/// doesn't grow without bound as the site is rebuilt. Returns null where
+/// storage is unavailable (insecure context, private browsing, quota
+/// denied) — the engine never learns the difference.
+async function openRowCache(hash) {
+  if (typeof caches === 'undefined') return null;
+  const name = `chops-rows-${hash}`;
+  try {
+    const cache = await caches.open(name);
+    for (const k of await caches.keys()) {
+      if (k.startsWith('chops-rows-') && k !== name) {
+        await caches.delete(k);
+      }
+    }
+    return cache;
+  } catch {
+    return null;
+  }
 }
 
 async function fetchOk(url) {
