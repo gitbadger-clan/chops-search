@@ -143,6 +143,13 @@ enum Cmd {
         #[command(subcommand)]
         action: ModelCmd,
     },
+
+    /// List indexed documents and their URLs — what you need to write
+    /// `expect` entries after adding a post.
+    Docs {
+        #[arg(long)]
+        artifacts: Option<PathBuf>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -217,6 +224,10 @@ fn main() -> Result<()> {
                     chops_search_cli::model::verify(&dir.unwrap_or(cfg.model))
                 }
             }
+        }
+        Cmd::Docs { artifacts } => {
+            let cfg = Config::discover(&std::env::current_dir()?)?;
+            chops_search_cli::explain::list_docs(&artifacts.unwrap_or(cfg.out))
         }
     }
 }

@@ -1,13 +1,14 @@
 //! `chops-search query` — explain a query against built artifacts.
 //!
-//! Loads the same four artifacts the browser fetches, runs the identical
-//! chops-search-core surface natively, and prints the evidence behind the final
-//! ranking: keyword scores (recomputed with the same formula), best-chunk
-//! cosine + chunk count per doc, and each engine's RRF contribution.
+//! Loads meta, index, and the full row matrix, runs the identical
+//! chops-search-core surface natively, and prints the evidence behind the
+//! ranking: keyword scores, best-chunk cosine, chunk count, and each
+//! engine's RRF contribution per document.
 //!
-//! The keyword-score and RRF-contribution math is duplicated from
-//! chops-search-core here because the core deliberately discards scores after
-//! ranking; if either formula ever changes in core, change it here too.
+//! Keyword scoring goes through `KeywordIndex::idf`/`term_score`, so it
+//! cannot drift from the ranker — it did once, when BM25 landed here a
+//! commit later than in core. Only the RRF contribution arithmetic is
+//! still restated, because core discards scores after ranking.
 
 use std::collections::HashMap;
 use std::fs;
@@ -20,6 +21,22 @@ use chops_search_core::rrf;
 use chops_search_core::score;
 use chops_search_core::store::RowStore;
 use chops_search_core::wordpiece::Vocab;
+
+/// List indexed documents with their URLs — what you need to write
+/// `expect` entries in a query set after adding a post.
+pub fn list_docs(artifacts: &Path) -> Result<()> {
+    let a = crate::artifacts::resolve(artifacts)?;
+    let index = Index::read(&fs::read(&a.index)?).context("parsing index")?;
+    let mut chunks = vec![0u32; index.docs.len()];
+    for &d in &index.chunk_doc {
+        chunks[d as usize] += 1;
+    }
+    println!("{:<4} {:>6}  {:<44} title", "doc", "chunks", "url");
+    for (i, d) in index.docs.iter().enumerate() {
+        println!("{:<4} {:>6}  {:<44} {}", i, chunks[i], d.url, d.title);
+    }
+    Ok(())
+}
 
 pub fn explain(artifacts: &Path, query: &str, limit: usize) -> Result<()> {
     // ---- Load exactly what the browser would ---------------------------
