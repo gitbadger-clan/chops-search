@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+  # Committed build output is only defensible if it's verifiable. This
+  # rebuilds the wasm and diffs against crates/chops-search-cli/assets/,
+  # so a stale embedded runtime can't ship — the failure it prevents is a
+  # browser running last week's engine against this week's artifacts.
+  assets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked
+      - name: Assets are current
+        run: cargo xtask assets --check
+
+  # The parity oracles need real model files, so they're #[ignore]d by
+  # default and run here against a cached download. These are the tests
+  # that make "tokenizer parity verified per-codepoint against
+  # HuggingFace" a claim rather than a hope.
+  parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Cache model
+        id: model
+        uses: actions/cache@v4
+        with:
+          path: .chops-search/model
+          key: potion-base-8M-${{ hashFiles('.chops-search/model.lock.json') }}
+
+      - name: Fetch model
+        if: steps.model.outputs.cache-hit != 'true'
+        run: cargo run -p chops-search-cli --release -- model fetch
+
+      - name: Verify model
+        run: cargo run -p chops-search-cli --release -- model verify
+
+      - name: Parity oracles
+        env:
+          CHOPS_SEARCH_MODEL_DIR: ${{ github.workspace }}/.chops-search/model
+        run: cargo test --workspace -- --ignored
+
+  # End-to-end over the committed demo site: builds real artifacts and
+  # scores them. Catches the class of bug unit tests can't — a chunking
+  # or URL change that compiles fine and quietly wrecks recall.
+  demo:
+    runs-on: ubuntu-latest
+    needs: parity
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/cache@v4
+        with:
+          path: .chops-search/model
+          key: potion-base-8M-${{ hashFiles('.chops-search/model.lock.json') }}
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked
+
+      - name: Build demo site index
+        working-directory: examples/demo-site
+        run: cargo run -p chops-search-cli --release -- build
+
+      - name: Search quality gate
+        working-directory: examples/demo-site
+        run: cargo run -p chops-search-cli --release -- eval --fail-under 0.85
