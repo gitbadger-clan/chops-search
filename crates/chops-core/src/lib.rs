@@ -14,6 +14,7 @@ pub mod keyword;
 pub mod plan;
 pub mod rrf;
 pub mod score;
+pub mod snippet;
 pub mod store;
 pub mod wordpiece;
 
