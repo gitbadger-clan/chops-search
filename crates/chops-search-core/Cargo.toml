@@ -1,8 +1,12 @@
 [package]
 name = "chops-search-core"
-version = "0.1.0"
-edition = "2021"
-description = "Pure engine: WordPiece, int8 row store, scoring, RRF, formats. No I/O."
+description = "Hybrid keyword + semantic search engine for static sites: WordPiece, int8 row store, BM25, RRF. Compiles to native and wasm unchanged."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 # NFD decomposition + combining-mark detection for BERT-style accent

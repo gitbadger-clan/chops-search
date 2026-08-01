@@ -1,7 +1,12 @@
 [package]
 name = "chops-search-cli"
-version = "0.1.0"
-edition = "2021"
+description = "Build tool for chops-search: turns a Zola content tree and a model2vec model into static search artifacts."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
 
 # Lib target exists so integration tests (the model2vec-rs parity oracle)
 # can reach the model loader; the binary stays thin over it.
