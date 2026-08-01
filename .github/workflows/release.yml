@@ -1,0 +1,143 @@
+name: Release
+
+# Publishes to crates.io when a v* tag is pushed. Everything here is a
+# gate: by the time `cargo publish` runs, the tag has been checked against
+# the manifest version, the embedded runtime has been proven current, and
+# the packaged file list has been proven to contain the assets that
+# `include_bytes!` needs.
+#
+# That last check exists because of a failure mode specific to this crate:
+# `cargo publish` excludes gitignored files, and the CLI embeds its wasm
+# runtime at compile time. A .gitignore rule that swallowed assets/ would
+# publish a crate that builds fine locally and fails for every user.
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# Dry-run it first with the workflow_dispatch trigger.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Package and verify without publishing'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  # Required by crates.io Trusted Publishing (OIDC). No long-lived
+  # CARGO_REGISTRY_TOKEN secret to leak or rotate; configure the repo as a
+  # trusted publisher in each crate's crates.io settings first.
+  id-token: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Read workspace version
+        id: version
+        run: |
+          v=$(cargo metadata --no-deps --format-version 1 \
+              | jq -r '.packages[] | select(.name == "chops-search-cli") | .version')
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "manifest version: $v"
+
+      # A tag that disagrees with the manifest publishes the wrong number
+      # and can't be undone — crates.io versions are permanent.
+      - name: Tag matches manifest
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          tag="${GITHUB_REF#refs/tags/v}"
+          if [ "$tag" != "${{ steps.version.outputs.version }}" ]; then
+            echo "::error::tag v$tag != manifest ${{ steps.version.outputs.version }}"
+            exit 1
+          fi
+
+      - run: cargo test --workspace
+
+      # The embedded runtime must match the source it was built from, or
+      # users get an engine that disagrees with the artifacts the same
+      # binary writes.
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked
+      - name: Embedded assets are current
+        run: cargo xtask assets --check
+
+      # `cargo publish` drops gitignored files. Prove the assets survive
+      # packaging rather than discovering it from a user's bug report.
+      - name: Packaged files include the runtime
+        run: |
+          cargo package -p chops-search-cli --allow-dirty --list > /tmp/files.txt
+          missing=0
+          for f in assets/chops_search_wasm_bg.wasm \
+                   assets/chops_search_wasm.js \
+                   assets/search-worker.js \
+                   assets/chops-search.js \
+                   assets/chops-search.css; do
+            if grep -qx "$f" /tmp/files.txt; then
+              echo "  ok  $f"
+            else
+              echo "::error::$f missing from the published package"
+              missing=1
+            fi
+          done
+          exit $missing
+
+      - name: Dry-run package
+        run: |
+          cargo package -p chops-search-core
+          cargo package -p chops-search-cli
+
+  publish:
+    needs: verify
+    if: startsWith(github.ref, 'refs/tags/') && !inputs.dry_run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Authenticate to crates.io
+        uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+
+      # Dependency order: the CLI's path dependency on core becomes a
+      # version requirement once published, so core must exist on the
+      # index first. `--no-verify` on the CLI skips a rebuild that already
+      # passed in `verify` — and would otherwise fail while core is still
+      # propagating.
+      - name: Publish chops-search-core
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: cargo publish -p chops-search-core
+
+      - name: Wait for the index
+        run: |
+          for i in $(seq 1 30); do
+            if cargo info chops-search-core@${{ needs.verify.outputs.version }} >/dev/null 2>&1; then
+              echo "core ${{ needs.verify.outputs.version }} is on the index"
+              exit 0
+            fi
+            echo "  waiting for core to propagate ($i/30)"
+            sleep 10
+          done
+          echo "::error::core did not appear on the index within 5 minutes"
+          exit 1
+
+      - name: Publish chops-search-cli
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: cargo publish -p chops-search-cli --no-verify
