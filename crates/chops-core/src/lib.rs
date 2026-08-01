@@ -5,17 +5,17 @@
 //! decision that could silently produce a wrong vector — tokenization,
 //! quantization, unloaded-row handling — lives here, once.
 
-pub mod bytes;
-pub mod wordpiece;
-pub mod store;
-pub mod plan;
-pub mod score;
-pub mod rrf;
-pub mod keyword;
-pub mod format;
-pub mod chunk;
 pub mod builder;
+pub mod bytes;
+pub mod chunk;
 pub mod engine;
+pub mod format;
+pub mod keyword;
+pub mod plan;
+pub mod rrf;
+pub mod score;
+pub mod store;
+pub mod wordpiece;
 
 /// Errors while parsing the binary artifacts.
 #[derive(Debug, Clone, PartialEq, Eq)]
