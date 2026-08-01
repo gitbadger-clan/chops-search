@@ -47,10 +47,12 @@ pub fn eval(
     }
 
     // ---- Artifacts, exactly as the worker fetches them -----------------
-    let meta_bytes = fs::read(artifacts.join("model.meta.bin")).context("model.meta.bin")?;
-    let index_bytes = fs::read(artifacts.join("index.bin")).context("index.bin")?;
-    let prefix_bytes = fs::read(artifacts.join("model.prefix.i8")).context("model.prefix.i8")?;
-    let rows_bytes = fs::read(artifacts.join("model.rows.i8")).context("model.rows.i8")?;
+    // ---- Artifacts, exactly as the worker fetches them -----------------
+    let a = crate::artifacts::resolve(artifacts)?;
+    let meta_bytes = fs::read(&a.meta).with_context(|| format!("{}", a.meta.display()))?;
+    let index_bytes = fs::read(&a.index).with_context(|| format!("{}", a.index.display()))?;
+    let prefix_bytes = fs::read(&a.prefix).with_context(|| format!("{}", a.prefix.display()))?;
+    let rows_bytes = fs::read(&a.rows).with_context(|| format!("{}", a.rows.display()))?;
 
     let mut engine = Engine::new(&meta_bytes, &index_bytes).map_err(|e| anyhow::anyhow!("{e}"))?;
     let mut opts = chops_core::score::ScoreOpts::default();

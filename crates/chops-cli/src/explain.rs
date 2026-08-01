@@ -24,10 +24,10 @@ use chops_core::wordpiece::Vocab;
 
 pub fn explain(artifacts: &Path, query: &str, limit: usize) -> Result<()> {
     // ---- Load exactly what the browser would ---------------------------
-    let meta_bytes =
-        fs::read(artifacts.join("model.meta.bin")).context("reading model.meta.bin")?;
-    let index_bytes = fs::read(artifacts.join("index.bin")).context("reading index.bin")?;
-    let rows_bytes = fs::read(artifacts.join("model.rows.i8")).context("reading model.rows.i8")?;
+    let a = crate::artifacts::resolve(artifacts)?;
+    let meta_bytes = fs::read(&a.meta).with_context(|| format!("{}", a.meta.display()))?;
+    let index_bytes = fs::read(&a.index).with_context(|| format!("{}", a.index.display()))?;
+    let rows_bytes = fs::read(&a.rows).with_context(|| format!("{}", a.rows.display()))?;
 
     let meta = ModelMeta::read(&meta_bytes).context("parsing model.meta.bin")?;
     let index = Index::read(&index_bytes).context("parsing index.bin")?;
