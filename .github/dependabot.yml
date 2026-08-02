@@ -1,0 +1,31 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    # Only touch Cargo.toml when the new version falls outside the
+    # existing requirement. Combined with tight requirements above, that
+    # means a PR exactly when a manual decision is needed.
+    versioning-strategy: increase-if-necessary
+    groups:
+      patches:
+        update-types: [patch]
+      clap:
+        patterns: ["clap", "clap_complete"]
+    ignore:
+      # Majors are never routine here. nalgebra and safetensors touch PCA
+      # and model loading; a wasm-bindgen major invalidates the committed
+      # assets.
+      - dependency-name: "*"
+        update-types: [version-update:semver-major]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]
