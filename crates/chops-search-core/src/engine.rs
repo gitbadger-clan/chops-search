@@ -180,10 +180,10 @@ impl Engine {
     /// title under the title makes a useless snippet.
     pub fn best_chunk(&self, doc: u16) -> u32 {
         let d = doc as usize;
-        if let Some(&c) = self.best_chunk.get(d) {
-            if c != u32::MAX {
-                return c;
-            }
+        if let Some(&c) = self.best_chunk.get(d)
+            && c != u32::MAX
+        {
+            return c;
         }
         let first = self.doc_first_chunk.get(d).copied().unwrap_or(0);
         if first == u32::MAX {

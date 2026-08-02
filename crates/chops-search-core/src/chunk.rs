@@ -33,21 +33,21 @@ pub fn prepare_markdown(src: &str) -> (Option<String>, String) {
     let mut body = src;
 
     // Front matter: must start the file.
-    if let Some(rest) = body.strip_prefix("+++") {
-        if let Some(end) = rest.find("\n+++") {
-            let fm = &rest[..end];
-            for line in fm.lines() {
-                let line = line.trim();
-                if let Some(v) = line.strip_prefix("title") {
-                    let v = v.trim_start().strip_prefix('=').unwrap_or("").trim();
-                    let v = v.trim_matches('"').trim_matches('\'');
-                    if !v.is_empty() {
-                        title = Some(v.to_string());
-                    }
+    if let Some(rest) = body.strip_prefix("+++")
+        && let Some(end) = rest.find("\n+++")
+    {
+        let fm = &rest[..end];
+        for line in fm.lines() {
+            let line = line.trim();
+            if let Some(v) = line.strip_prefix("title") {
+                let v = v.trim_start().strip_prefix('=').unwrap_or("").trim();
+                let v = v.trim_matches('"').trim_matches('\'');
+                if !v.is_empty() {
+                    title = Some(v.to_string());
                 }
             }
-            body = rest[end + 4..].trim_start_matches('\n');
         }
+        body = rest[end + 4..].trim_start_matches('\n');
     }
 
     // Drop fenced code blocks; strip heading markers but keep heading
@@ -186,11 +186,11 @@ pub fn chunk_prose(prose: &str, target_chars: usize) -> Vec<String> {
         if !cur.is_empty() && cur.len() + p.len() > target_chars {
             chunks.push(core::mem::take(&mut cur));
             // overlap: seed next chunk with the previous piece
-            if let Some(lp) = last_piece {
-                if lp.len() < target_chars {
-                    cur.push_str(lp);
-                    cur.push('\n');
-                }
+            if let Some(lp) = last_piece
+                && lp.len() < target_chars
+            {
+                cur.push_str(lp);
+                cur.push('\n');
             }
         }
         cur.push_str(p);
@@ -220,13 +220,12 @@ fn split_long_paragraph(p: &str, target: usize) -> Vec<String> {
     let mut last = 0;
     let mut iter = p.char_indices().peekable();
     while let Some((i, c)) = iter.next() {
-        if matches!(c, '.' | '!' | '?') {
-            if let Some(&(_, next)) = iter.peek() {
-                if next.is_whitespace() {
-                    sentences.push(&p[last..i + c.len_utf8()]);
-                    last = i + c.len_utf8();
-                }
-            }
+        if matches!(c, '.' | '!' | '?')
+            && let Some(&(_, next)) = iter.peek()
+            && next.is_whitespace()
+        {
+            sentences.push(&p[last..i + c.len_utf8()]);
+            last = i + c.len_utf8();
         }
     }
     if last < p.len() {
