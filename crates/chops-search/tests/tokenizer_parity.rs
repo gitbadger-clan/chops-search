@@ -21,7 +21,7 @@
 //!
 //!   hf download minishlab/potion-base-8M tokenizer.json \
 //!       --local-dir model/
-//!   CHOPS_SEARCH_MODEL_DIR=model cargo test -p chops-search-cli --test tokenizer_parity -- --ignored
+//!   CHOPS_SEARCH_MODEL_DIR=model cargo test -p chops-search --test tokenizer_parity -- --ignored
 
 use chops_search_core::wordpiece::Vocab;
 use tokenizers::Tokenizer;
@@ -198,7 +198,7 @@ fn codepoint_sweep_over_claimed_ranges() {
 /// Not an assertion — a map of where parity ends. Run it when extending
 /// the punctuation table or before claiming support for a new script:
 ///
-///   CHOPS_SEARCH_MODEL_DIR=model cargo test -p chops-search-cli --test tokenizer_parity \
+///   CHOPS_SEARCH_MODEL_DIR=model cargo test -p chops-search --test tokenizer_parity \
 ///       -- --ignored survey --nocapture
 ///
 /// Expected known gaps: Indic spacing marks (Mc), which BERT keeps and

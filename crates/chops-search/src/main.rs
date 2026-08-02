@@ -29,11 +29,11 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use sha2::{Digest, Sha256};
 
-use chops_search_cli::assets;
-use chops_search_cli::config::Config;
-use chops_search_cli::frontmatter::{self, FrontMatter};
-use chops_search_cli::model_loader::load_model2vec;
-use chops_search_cli::pca::pca_reduce;
+use chops_search::assets;
+use chops_search::config::Config;
+use chops_search::frontmatter::{self, FrontMatter};
+use chops_search::model_loader::load_model2vec;
+use chops_search::pca::pca_reduce;
 use chops_search_core::builder::{
     embed_f32, frequency_permutation, permute_rows_f32, quantize_global, quantize_rows,
 };
@@ -206,7 +206,7 @@ fn main() -> Result<()> {
         } => {
             let cfg = load_config(&site)?;
             let dir = artifacts.unwrap_or(cfg.out);
-            chops_search_cli::explain::explain(&dir, &query, limit)
+            chops_search::explain::explain(&dir, &query, limit)
         }
         Cmd::Eval {
             artifacts,
@@ -219,7 +219,7 @@ fn main() -> Result<()> {
             let cfg = load_config(&site)?;
             let dir = artifacts.unwrap_or_else(|| cfg.out.clone());
             let queries = queries.unwrap_or_else(|| cfg.root.join("fixtures/queries.toml"));
-            chops_search_cli::eval::eval(
+            chops_search::eval::eval(
                 &dir,
                 &queries,
                 kind.as_deref(),
@@ -235,26 +235,24 @@ fn main() -> Result<()> {
                     repo,
                     revision,
                     dir,
-                } => chops_search_cli::model::fetch(
+                } => chops_search::model::fetch(
                     &repo,
                     revision.as_deref(),
                     &dir.unwrap_or(cfg.model),
                 ),
-                ModelCmd::Verify { dir } => {
-                    chops_search_cli::model::verify(&dir.unwrap_or(cfg.model))
-                }
+                ModelCmd::Verify { dir } => chops_search::model::verify(&dir.unwrap_or(cfg.model)),
             }
         }
         Cmd::Docs { artifacts } => {
             let cfg = load_config(&site)?;
-            chops_search_cli::explain::list_docs(&artifacts.unwrap_or(cfg.out))
+            chops_search::explain::list_docs(&artifacts.unwrap_or(cfg.out))
         }
         Cmd::Init { no_page } => {
             let root = match &site {
                 Some(p) => p.clone(),
                 None => std::env::current_dir()?,
             };
-            chops_search_cli::init::init(&root, !no_page)
+            chops_search::init::init(&root, !no_page)
         }
     }
 }

@@ -23,7 +23,7 @@ jobs:
       - run: cargo test --workspace
 
   # Committed build output is only defensible if it's verifiable. This
-  # rebuilds the wasm and diffs against crates/chops-search-cli/assets/,
+  # rebuilds the wasm and diffs against crates/chops-search/assets/,
   # so a stale embedded runtime can't ship — the failure it prevents is a
   # browser running last week's engine against this week's artifacts.
   assets:
@@ -59,10 +59,10 @@ jobs:
 
       - name: Fetch model
         if: steps.model.outputs.cache-hit != 'true'
-        run: cargo run -p chops-search-cli --release -- model fetch
+        run: cargo run -p chops-search --release -- model fetch
 
       - name: Verify model
-        run: cargo run -p chops-search-cli --release -- model verify
+        run: cargo run -p chops-search --release -- model verify
 
       - name: Parity oracles
         env:
@@ -92,8 +92,8 @@ jobs:
 
       - name: Build demo site index
         working-directory: examples/demo-site
-        run: cargo run -p chops-search-cli --release -- build
+        run: cargo run -p chops-search --release -- build
 
       - name: Search quality gate
         working-directory: examples/demo-site
-        run: cargo run -p chops-search-cli --release -- eval --fail-under 0.85
+        run: cargo run -p chops-search --release -- eval --fail-under 0.85

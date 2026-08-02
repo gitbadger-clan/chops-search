@@ -7,9 +7,9 @@ wrecks ranking.
 
 ## Running it
 
-    cargo run -p chops-search-cli --release -- model fetch   # once
-    cargo run -p chops-search-cli --release -- build
-    cargo run -p chops-search-cli --release -- eval
+    cargo run -p chops-search --release -- model fetch   # once
+    cargo run -p chops-search --release -- build
+    cargo run -p chops-search --release -- eval
     zola serve                                               # then /search/
 
 ## About the content

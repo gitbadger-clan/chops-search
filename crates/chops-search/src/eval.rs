@@ -230,7 +230,7 @@ pub fn eval(
             for (i, u) in urls.iter().enumerate() {
                 println!("      {}. {u}", i + 1);
             }
-            println!("      explain: cargo run -p chops-search-cli --release -- query {q:?}");
+            println!("      explain: cargo run -p chops-search --release -- query {q:?}");
         }
     }
 

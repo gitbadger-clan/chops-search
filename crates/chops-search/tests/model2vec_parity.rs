@@ -10,11 +10,11 @@
 //!
 //!   huggingface-cli download minishlab/potion-base-8M \
 //!       tokenizer.json model.safetensors config.json --local-dir model/
-//!   CHOPS_SEARCH_MODEL_DIR=model cargo test -p chops-search-cli -- --ignored
+//!   CHOPS_SEARCH_MODEL_DIR=model cargo test -p chops-search -- --ignored
 //!
 //! (config.json is needed by model2vec-rs's loader, not by chops itself.)
 
-use chops_search_cli::model_loader::load_model2vec;
+use chops_search::model_loader::load_model2vec;
 use chops_search_core::builder::embed_f32;
 use chops_search_core::wordpiece::Vocab;
 use model2vec_rs::model::StaticModel;
@@ -51,7 +51,7 @@ fn embeddings_match_official_implementation() {
     );
 
     // Our path: the exact code the browser runs (chops-search-core), fed by the
-    // exact loader the build tool runs (chops-search-cli).
+    // exact loader the build tool runs (chops-search).
     let (tokens, rows, dim) = load_model2vec(dir.as_ref()).expect("chops loader failed");
     let vocab = Vocab::from_tokens(&tokens);
 

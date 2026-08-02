@@ -1,7 +1,7 @@
 //! Repo automation. `cargo xtask <task>`.
 //!
 //! The one job that matters: regenerate
-//! `crates/chops-search-cli/assets/`, the files the CLI embeds with
+//! `crates/chops-search/assets/`, the files the CLI embeds with
 //! `include_bytes!` and writes into a site's `out` directory.
 //!
 //! Committed build output is normally a smell, so it earns its place by
@@ -16,7 +16,7 @@
 //! can't ship a mismatched pair.
 //!
 //! Tasks:
-//!   assets [--check]   build wasm + copy web/ → crates/chops-search-cli/assets/
+//!   assets [--check]   build wasm + copy web/ → crates/chops-search/assets/
 //!   dist               assets, then a release CLI build
 //!
 //! Set up with `.cargo/config.toml`:
@@ -75,7 +75,7 @@ fn root() -> PathBuf {
 
 fn assets(check: bool) -> Result<()> {
     let root = root();
-    let dest = root.join("crates/chops-search-cli/assets");
+    let dest = root.join("crates/chops-search/assets");
     let staging = root.join("target/xtask-wasm");
 
     // Build into a staging directory rather than straight into assets/,
@@ -176,7 +176,7 @@ fn assets(check: bool) -> Result<()> {
 fn dist() -> Result<()> {
     let status = Command::new(env!("CARGO"))
         .current_dir(root())
-        .args(["build", "--release", "-p", "chops-search-cli"])
+        .args(["build", "--release", "-p", "chops-search"])
         .status()?;
     if !status.success() {
         return Err("release build failed".into());
@@ -196,7 +196,7 @@ fn demo(rest: &[String]) -> Result<()> {
     let root = root();
     let status = Command::new(env!("CARGO"))
         .current_dir(&root)
-        .args(["run", "--release", "-p", "chops-search-cli", "--", "--site"])
+        .args(["run", "--release", "-p", "chops-search", "--", "--site"])
         .arg(root.join("examples/demo-site"))
         .args(rest)
         .status()?;

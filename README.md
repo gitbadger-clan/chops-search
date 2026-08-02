@@ -28,7 +28,7 @@ one eager multi-megabyte blob.
 ## Install
 
 ```fish
-cargo install --git https://github.com/gitbadger-clan/chops-search --locked chops-search-cli
+cargo install --git https://github.com/gitbadger-clan/chops-search --locked chops-search
 ```
 
 The wasm engine and browser runtime are embedded in the binary. That is

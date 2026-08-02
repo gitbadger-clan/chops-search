@@ -11,7 +11,7 @@ rust-version.workspace = true
 # Lib target exists so integration tests (the model2vec-rs parity oracle)
 # can reach the model loader; the binary stays thin over it.
 [lib]
-name = "chops_search_cli"
+name = "chops_search"
 path = "src/lib.rs"
 
 [[bin]]
@@ -38,7 +38,7 @@ unicode-normalization = "0.1"
 # Raw HF tokenizer as a parity oracle, alongside model2vec-rs. Already in
 # the tree transitively; declared here so tests can compare exact token
 # ids instead of embedding cosines. Align the version with what
-# model2vec-rs pulls (`cargo tree -p chops-search-cli | grep tokenizers`) so the
+# model2vec-rs pulls (`cargo tree -p chops-search | grep tokenizers`) so the
 # build doesn't carry two copies.
 tokenizers = "0.23"
 

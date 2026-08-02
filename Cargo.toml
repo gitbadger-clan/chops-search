@@ -11,7 +11,7 @@ rust-version = "1.97"
 resolver = "2"
 members = [
     "crates/chops-search-core",
-    "crates/chops-search-cli",
+    "crates/chops-search",
     "crates/chops-search-wasm", "xtask",
 ]
 
