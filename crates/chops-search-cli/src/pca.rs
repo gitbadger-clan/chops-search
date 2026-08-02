@@ -28,7 +28,7 @@ use nalgebra::{DMatrix, SymmetricEigen};
 pub fn pca_reduce(rows: &[f32], dim: usize, k: usize) -> Vec<f32> {
     assert!(k > 0 && k <= dim, "k must be in 1..=dim");
     assert!(
-        dim > 0 && rows.len() % dim == 0,
+        dim > 0 && rows.len().is_multiple_of(dim),
         "rows not a multiple of dim"
     );
     let n = rows.len() / dim;

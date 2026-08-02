@@ -41,7 +41,7 @@ pub fn load_model2vec(dir: &Path) -> Result<(Vec<String>, Vec<f32>, usize)> {
     let st = safetensors::SafeTensors::deserialize(&st_raw)?;
     // model2vec names the tensor "embeddings"; fall back to the sole tensor.
     let names = st.names();
-    let name = if names.iter().any(|n| *n == "embeddings") {
+    let name = if names.contains(&"embeddings") {
         "embeddings"
     } else if names.len() == 1 {
         names[0]
@@ -60,7 +60,9 @@ pub fn load_model2vec(dir: &Path) -> Result<(Vec<String>, Vec<f32>, usize)> {
     let rows: Vec<f32> = match t.dtype() {
         safetensors::Dtype::F32 => t
             .data()
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
             .collect(),
         other => bail!(
