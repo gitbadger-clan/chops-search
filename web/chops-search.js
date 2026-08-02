@@ -1,47 +1,209 @@
-// Page-side glue for chops-search. Changes from v2: renders snippets.
+// Page-side glue for chops-search. Two modes, chosen automatically:
 //
-// Snippets arrive as a SECOND message after the results, so the list
-// renders immediately and then fills in — same progressive pattern as
-// keyword-then-semantic. Result rows are kept as DOM references so the
-// snippet pass mutates them in place instead of re-rendering (which would
-// flash and would drop focus if the user were arrowing through results).
+// INLINE — the page already has #chops-input (a dedicated /search/ page).
+// Used as-is.
 //
-// Highlighting builds text nodes and <mark> elements directly. Never
-// innerHTML: snippet text is site content, but it reaches here as bytes
-// off the network, and one XSS in a search box is worse than every
-// ranking bug in this repo combined.
+// OVERLAY — no #chops-input on the page. The script builds its own dialog
+// and opens it on Ctrl/Cmd-K, `/`, or a click on any [data-chops-open]
+// element. This is what makes site-wide search one <script> tag in a base
+// template instead of markup repeated on every page, and it's why the
+// mode is detected rather than configured: a site with both a search page
+// and a header shortcut gets the right behavior on each without a flag.
+//
+// The overlay DOM is built on first open, not at load. Most visits never
+// search, and a script in <head> on every page should cost nothing until
+// it's used — same reasoning as booting the worker on first focus rather
+// than on load.
+//
+// Keyboard: ArrowUp/Down move the selection, Enter follows it, Escape
+// closes and restores focus to whatever had it before. That's the ARIA
+// combobox pattern; without it the overlay is a mouse-only feature, which
+// for a keyboard-opened dialog is an odd thing to be.
 
 let worker = null;
 let ready = false;
 let failed = false;
 let gen = 0;
 let debounceTimer = 0;
-let rows = [];        // { li, snipEl } per rendered result
-let lastWords = [];   // query words for the currently rendered results
+let rows = [];
+let lastWords = [];
+let selected = -1;
+
+let input = null;
+let resultsEl = null;
+let modeEl = null;
+let overlay = null;      // null in inline mode
+let lastFocused = null;
 
 const DEBOUNCE_MS = 120;
-/// Characters of context shown around the first matched term.
 const SNIPPET_CHARS = 200;
-/// How far before the match the window starts, so the term isn't flush left.
 const SNIPPET_LEAD = 50;
+const BASE = '/search';
 
-const input = document.querySelector('#chops-input');
-const resultsEl = document.querySelector('#chops-results');
-const modeEl = document.querySelector('#chops-mode');
+// ---- mode detection -------------------------------------------------
 
-input?.addEventListener('focus', boot, { once: true });
+const existing = document.querySelector('#chops-input');
+if (existing) {
+  bindInline(existing);
+} else {
+  bindOverlayTriggers();
+}
 
-input?.addEventListener('input', () => {
-  clearTimeout(debounceTimer);
-  debounceTimer = setTimeout(fire, DEBOUNCE_MS);
-});
+function bindInline(el) {
+  input = el;
+  resultsEl = document.querySelector('#chops-results');
+  modeEl = document.querySelector('#chops-mode');
+  wireInput();
+  input.addEventListener('focus', boot, { once: true });
+}
 
-input?.addEventListener('keydown', (ev) => {
-  if (ev.key === 'Enter') {
+function bindOverlayTriggers() {
+  document.addEventListener('keydown', (ev) => {
+    const k = ev.key;
+    const mod = ev.metaKey || ev.ctrlKey;
+    if ((mod && (k === 'k' || k === 'K')) || (k === '/' && !mod && !isTyping(ev.target))) {
+      ev.preventDefault();
+      openOverlay();
+    }
+  });
+  document.querySelectorAll('[data-chops-open]').forEach((el) => {
+    el.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      openOverlay();
+    });
+  });
+}
+
+/// `/` is a shortcut only when it isn't a character someone is typing.
+function isTyping(el) {
+  if (!el) return false;
+  const tag = el.tagName;
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable;
+}
+
+// ---- overlay --------------------------------------------------------
+
+function buildOverlay() {
+  overlay = document.createElement('div');
+  overlay.className = 'chops-overlay';
+  overlay.setAttribute('role', 'dialog');
+  overlay.setAttribute('aria-modal', 'true');
+  overlay.setAttribute('aria-label', 'Search');
+  overlay.hidden = true;
+
+  const panel = document.createElement('div');
+  panel.className = 'chops chops-panel';
+
+  input = document.createElement('input');
+  input.type = 'search';
+  input.id = 'chops-input';
+  input.placeholder = 'Search…';
+  input.autocomplete = 'off';
+  input.spellcheck = false;
+  input.setAttribute('role', 'combobox');
+  input.setAttribute('aria-expanded', 'false');
+  input.setAttribute('aria-controls', 'chops-results');
+  input.setAttribute('aria-autocomplete', 'list');
+
+  modeEl = document.createElement('span');
+  modeEl.id = 'chops-mode';
+  modeEl.className = 'chops-mode';
+  modeEl.setAttribute('aria-live', 'polite');
+
+  resultsEl = document.createElement('ul');
+  resultsEl.id = 'chops-results';
+  resultsEl.className = 'chops-results';
+  resultsEl.setAttribute('role', 'listbox');
+
+  panel.append(input, modeEl, resultsEl);
+  overlay.append(panel);
+  document.body.appendChild(overlay);
+
+  // Clicking the backdrop closes; clicking the panel must not.
+  overlay.addEventListener('click', (ev) => {
+    if (ev.target === overlay) closeOverlay();
+  });
+  wireInput();
+}
+
+function openOverlay() {
+  if (failed) return;
+  if (!overlay) buildOverlay();
+  if (!overlay.hidden) return;
+  lastFocused = document.activeElement;
+  overlay.hidden = false;
+  document.documentElement.classList.add('chops-open');
+  input.focus();
+  input.select();
+  boot();
+}
+
+function closeOverlay() {
+  if (!overlay || overlay.hidden) return;
+  overlay.hidden = true;
+  document.documentElement.classList.remove('chops-open');
+  render([], true, '');
+  // Returning focus is the part people notice only when it's missing:
+  // without it, Escape drops the caret at the top of the document.
+  lastFocused?.focus?.();
+}
+
+// ---- input + keyboard ------------------------------------------------
+
+function wireInput() {
+  input.addEventListener('input', () => {
     clearTimeout(debounceTimer);
-    fire();
-  }
-});
+    debounceTimer = setTimeout(fire, DEBOUNCE_MS);
+  });
+
+  input.addEventListener('keydown', (ev) => {
+    switch (ev.key) {
+      case 'Enter':
+        if (selected >= 0 && rows[selected]) {
+          ev.preventDefault();
+          rows[selected].li.querySelector('a')?.click();
+          return;
+        }
+        clearTimeout(debounceTimer);
+        fire();
+        break;
+      case 'ArrowDown':
+        ev.preventDefault();
+        move(1);
+        break;
+      case 'ArrowUp':
+        ev.preventDefault();
+        move(-1);
+        break;
+      case 'Escape':
+        if (overlay) {
+          ev.preventDefault();
+          closeOverlay();
+        }
+        break;
+      case 'Tab':
+        // A modal dialog keeps focus inside it. With one focusable
+        // element that means holding focus on the input.
+        if (overlay) ev.preventDefault();
+        break;
+    }
+  });
+}
+
+function move(delta) {
+  if (rows.length === 0) return;
+  select((selected + delta + rows.length + (selected < 0 ? 1 : 0)) % rows.length);
+}
+
+function select(i) {
+  rows.forEach((r, n) => r.li.setAttribute('aria-selected', String(n === i)));
+  selected = i;
+  rows[i]?.li.scrollIntoView({ block: 'nearest' });
+  // aria-activedescendant keeps the input as the focused element while
+  // announcing the highlighted option — moving real focus into the list
+  // would break typing.
+  input.setAttribute('aria-activedescendant', rows[i] ? rows[i].li.id : '');
+}
 
 function fire() {
   if (failed) return;
@@ -54,9 +216,11 @@ function fire() {
   worker.postMessage({ type: 'query', q, gen, limit: 8 });
 }
 
+// ---- worker ----------------------------------------------------------
+
 function boot() {
   if (worker) return;
-  worker = new Worker('/search/search-worker.js', { type: 'module' });
+  worker = new Worker(`${BASE}/search-worker.js`, { type: 'module' });
   worker.addEventListener('error', () => fail('worker failed to load'));
 
   worker.onmessage = (ev) => {
@@ -75,12 +239,12 @@ function boot() {
       else console.warn('chops-search:', msg.message);
     }
   };
-  worker.postMessage({ type: 'init', base: '/search' });
+  worker.postMessage({ type: 'init', base: BASE });
 }
 
 function fail(message) {
   failed = true;
-  console.warn('chops-search: search unavailable —', message);
+  console.warn('chops-search: unavailable —', message);
   if (modeEl) modeEl.textContent = 'search unavailable';
   if (resultsEl) resultsEl.replaceChildren();
   rows = [];
@@ -88,29 +252,38 @@ function fail(message) {
   worker = null;
 }
 
+// ---- rendering -------------------------------------------------------
+
 function render(results, semantic, queryText) {
   if (!resultsEl) return;
   lastWords = queryWords(queryText);
-  rows = results.map(({ url, title }) => {
+  selected = -1;
+  rows = results.map(({ url, title }, i) => {
     const li = document.createElement('li');
+    li.id = `chops-opt-${i}`;
+    li.setAttribute('role', 'option');
+    li.setAttribute('aria-selected', 'false');
+
     const a = document.createElement('a');
     a.href = url;
     a.textContent = title;
     li.appendChild(a);
-    // Placeholder for the snippet pass; stays empty if snippets never
-    // arrive, so nothing shifts when they don't.
+
     const snipEl = document.createElement('p');
-    snipEl.className = 'chops-search-snippet';
+    snipEl.className = 'chops-snippet';
     li.appendChild(snipEl);
+
+    li.addEventListener('mousemove', () => select(i));
     return { li, snipEl };
   });
   resultsEl.replaceChildren(...rows.map((r) => r.li));
   resultsEl.dataset.mode = semantic ? 'hybrid' : 'keyword';
+  input.setAttribute('aria-expanded', String(results.length > 0));
+  input.setAttribute('aria-activedescendant', '');
   if (modeEl) {
     modeEl.textContent = results.length
-      ? semantic
-        ? 'hybrid (keyword + semantic)'
-        : 'keyword only'
+      ? `${results.length} result${results.length === 1 ? '' : 's'} · ${semantic ? 'hybrid' : 'keyword only'
+      }`
       : '';
   }
 }
@@ -124,15 +297,11 @@ function applySnippets(snippets) {
 }
 
 /// Alphanumeric runs, lowercased — the same split the keyword index uses,
-/// so what gets highlighted is what actually matched. Accents are NOT
-/// stripped here while the index does strip them, so "café" highlights
-/// only on an exact-accent match; a cosmetic gap, not a ranking one.
+/// so what gets highlighted is what actually matched.
 function queryWords(q) {
   return (q.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []).filter((w) => w.length > 1);
 }
 
-/// Trim the chunk to a readable window around the first matched term,
-/// snapping to word boundaries so it doesn't start mid-word.
 function window_(text, words) {
   const flat = text.replace(/\s+/g, ' ').trim();
   if (flat.length <= SNIPPET_CHARS) return flat;
@@ -159,14 +328,13 @@ function snapEnd(s) {
   return sp > s.length - 20 ? s.slice(0, sp) : s;
 }
 
-/// Build alternating text nodes and <mark> elements. Returns nodes, never
-/// a string — the caller inserts them with replaceChildren.
+/// Text nodes and <mark> elements, never innerHTML: snippet text arrives
+/// as bytes off the network, and one XSS in a search box outweighs every
+/// ranking bug in this project.
 function highlight(text, words) {
   if (words.length === 0) return [document.createTextNode(text)];
   const hay = text.toLowerCase();
 
-  // Collect non-overlapping match spans, longest word first so "chromium"
-  // doesn't pre-empt "chromiumoxide".
   const spans = [];
   for (const w of [...words].sort((a, b) => b.length - a.length)) {
     let from = 0;

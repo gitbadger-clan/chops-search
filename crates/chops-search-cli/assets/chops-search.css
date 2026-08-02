@@ -6,22 +6,17 @@
  * the theming interface instead, so a site can restyle this without a
  * preprocessor and without overriding selectors.
  *
- * Deliberately unopinionated: no colours of its own, no fonts, no box
- * shadows. Everything derives from `currentColor` and the surrounding
- * text, so it inherits a light or dark theme with no media query and no
- * second ruleset. A search widget that imposes a look is a widget people
- * fight rather than adopt.
- *
- * To restyle, set the variables on .chops (or any ancestor):
+ * Deliberately unopinionated: no colours of its own, no fonts. Everything
+ * derives from `currentColor` and the surrounding text, so it inherits a
+ * light or dark theme with no media query and no second ruleset. The one
+ * exception is the overlay's panel background, which has to be opaque —
+ * `--chops-panel-bg` is the variable to set if `Canvas` doesn't match
+ * your page.
  *
  *   .chops {
  *     --chops-accent: var(--my-link-color);
- *     --chops-radius: 0;
- *     --chops-gap: 1rem;
+ *     --chops-panel-bg: #14161a;
  *   }
- *
- * To replace wholesale, don't link this file — the class names are the
- * contract and they're listed at the bottom.
  */
 
 .chops {
@@ -31,6 +26,7 @@
   --chops-radius: 6px;
   --chops-mark: 18%;
   --chops-hover: 8%;
+  --chops-panel-bg: Canvas;
 }
 
 /* ---- input ---------------------------------------------------------- */
@@ -52,10 +48,9 @@
 
 /* ---- status line ---------------------------------------------------- */
 
-/* Announces result counts and the keyword/hybrid mode. Kept visible
- * rather than screen-reader-only: which engine answered is genuinely
- * useful information, and hiding it wastes the one honest signal this
- * search box has. */
+/* Announces result counts and which engine answered. Visible rather than
+ * screen-reader-only: keyword-vs-hybrid is genuinely useful information,
+ * and hiding it wastes the one honest signal this search box has. */
 .chops-mode {
   display: inline-block;
   margin-top: 0.35rem;
@@ -84,9 +79,9 @@
   border-radius: var(--chops-radius);
 }
 
-/* Keyboard navigation state. aria-selected is the combobox pattern's
- * cursor — the browser gives no free styling for it, and without a
- * visible cue arrow keys move an invisible focus. */
+/* The combobox cursor. The browser gives no free styling for
+ * aria-selected, and without a visible cue the arrow keys move an
+ * invisible focus. */
 .chops-results > li[aria-selected='true'] {
   background: color-mix(in srgb, currentColor var(--chops-hover), transparent);
 }
@@ -110,11 +105,10 @@
   opacity: var(--chops-muted);
 }
 
-/* Snippets arrive after the results, so this is empty for a moment on
- * every query. Collapsing rather than reserving space would make the list
- * jump; collapsing when snippets never arrive at all (fetch failed, older
- * build) is the right fallback. The trade is a small reflow — preferable
- * to a permanent gap on sites that don't ship snippets. */
+/* Snippets arrive a moment after the results, so this is briefly empty on
+ * every query. Collapsing rather than reserving space costs a small
+ * reflow; reserving it would leave a permanent gap on sites whose host
+ * ignores range requests and never delivers snippets at all. */
 .chops-snippet:empty {
   display: none;
 }
@@ -125,9 +119,60 @@
   border-radius: 2px;
 }
 
-/* ---- reduced motion ------------------------------------------------- */
+/* ---- overlay -------------------------------------------------------- */
+
+/* Used when a page has no #chops-input and the script mounts its own
+ * dialog. `hidden` does the showing and hiding, so there's no state to
+ * keep in a class. */
+.chops-overlay[hidden] {
+  display: none;
+}
+
+.chops-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  justify-content: center;
+  /* Not centred: a dialog that grows downward as results arrive would
+   * jump around if it were vertically centred. */
+  align-items: flex-start;
+  padding: 10vh 1rem 1rem;
+  background: color-mix(in srgb, Canvas 60%, transparent);
+  backdrop-filter: blur(2px);
+}
+
+.chops-panel {
+  width: min(38rem, 100%);
+  max-height: 70vh;
+  overflow-y: auto;
+  padding: 1rem;
+  border-radius: calc(var(--chops-radius) * 2);
+  /* Opaque: results must stay readable over whatever the page had here. */
+  background: var(--chops-panel-bg);
+  border: 1px solid color-mix(in srgb, currentColor 15%, transparent);
+  box-shadow: 0 1rem 3rem color-mix(in srgb, black 25%, transparent);
+}
+
+/* Stops the page scrolling behind an open dialog. */
+.chops-open,
+.chops-open body {
+  overflow: hidden;
+}
+
+@media (max-width: 34rem) {
+  .chops-overlay {
+    padding-top: 2vh;
+  }
+  .chops-panel {
+    max-height: 90vh;
+  }
+}
 
 @media (prefers-reduced-motion: reduce) {
+  .chops-overlay {
+    backdrop-filter: none;
+  }
   .chops * {
     transition: none !important;
   }
@@ -135,14 +180,19 @@
 
 /* ---- class contract -------------------------------------------------
  *
- * These are what chops-search.js creates and expects. Restyle freely;
- * renaming means forking the page script.
+ * What chops-search.js creates and expects. Restyle freely; renaming
+ * means forking the page script.
  *
- *   .chops                       wrapper
+ *   .chops                       wrapper (also on the overlay panel)
+ *   .chops-overlay               the dialog backdrop, when self-mounted
+ *   .chops-panel                 the dialog itself
+ *   .chops-open                  set on <html> while the dialog is open
  *   #chops-input                 the search input (role=combobox)
  *   #chops-mode / .chops-mode    status line (aria-live)
  *   #chops-results               result list (role=listbox)
  *   .chops-results > li          one result (role=option)
  *   .chops-snippet               matched text under a result
  *   .chops-snippet mark          highlighted query terms
+ *
+ * Any element with [data-chops-open] opens the overlay on click.
  */
