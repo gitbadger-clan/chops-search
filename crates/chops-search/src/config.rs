@@ -135,13 +135,13 @@ impl Config {
             cfg.chunk_chars = v as usize;
         }
         if let Some(v) = int("prefix_rows")? {
-            if v < 0 || v > u32::MAX as i64 {
+            if !(0..=u32::MAX as i64).contains(&v) {
                 anyhow::bail!("prefix_rows out of range");
             }
             cfg.prefix_rows = v as u32;
         }
         if let Some(v) = int("title_weight")? {
-            if v < 1 || v > u16::MAX as i64 {
+            if !(1..=u16::MAX as i64).contains(&v) {
                 anyhow::bail!("title_weight out of range");
             }
             cfg.title_weight = v as u16;
