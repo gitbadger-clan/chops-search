@@ -52,7 +52,7 @@ jobs:
 
       - name: Cache model
         id: model
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: .chops-search/model
           key: potion-base-8M-${{ hashFiles('.chops-search/model.lock.json') }}
@@ -82,7 +82,7 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: .chops-search/model
           key: potion-base-8M-${{ hashFiles('.chops-search/model.lock.json') }}
