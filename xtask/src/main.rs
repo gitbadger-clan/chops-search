@@ -92,6 +92,8 @@ fn assets(check: bool) -> Result<()> {
             "--out-dir",
         ])
         .arg(&staging)
+        .env("RUSTFLAGS", "-Zunstable-options -Cpanic=immediate-abort")
+        .args(["--", "-Z", "build-std=std,panic_abort"])
         .status()
         .map_err(|e| format!("wasm-pack not found ({e}) — cargo install wasm-pack --locked"))?;
     if !status.success() {
