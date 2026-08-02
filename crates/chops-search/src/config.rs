@@ -147,7 +147,7 @@ impl Config {
             cfg.title_weight = v as u16;
         }
         if let Some(v) = int("tag_weight")? {
-            if v < 1 || v > u16::MAX as i64 {
+            if !(1..=u16::MAX as i64).contains(&v) {
                 anyhow::bail!("tag_weight out of range");
             }
             cfg.tag_weight = v as u16;
