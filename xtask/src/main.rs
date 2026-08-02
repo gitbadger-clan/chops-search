@@ -26,6 +26,7 @@
 //! xtask = "run --package xtask --"
 //! ```
 
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -108,25 +109,29 @@ fn assets(check: bool) -> Result<()> {
         planned.push((root.join("web").join(name), dest.join(name)));
     }
 
+    // Stamp comparison first: --check must not need wasm-pack, and
+    // rebuilding to compare bytes was never reliable across machines
+    // (absolute paths in panic metadata, differing wasm-opt versions).
     if check {
-        let mut stale = Vec::new();
-        for (src, dst) in &planned {
-            let fresh = fs::read(src).map_err(|e| format!("{}: {e}", src.display()))?;
-            match fs::read(dst) {
-                Ok(committed) if committed == fresh => {}
-                Ok(_) => stale.push(format!("{} differs", rel(&root, dst))),
-                Err(_) => stale.push(format!("{} missing", rel(&root, dst))),
-            }
+        let want = input_hash(&root)?;
+        let got = fs::read_to_string(dest.join(".stamp")).unwrap_or_default();
+        if got.trim() != want {
+            return Err(format!(
+                "assets are stale: sources hash {want}, stamp says {}\n\
+                 run `cargo xtask assets` and commit",
+                if got.trim().is_empty() {
+                    "(missing)"
+                } else {
+                    got.trim()
+                }
+            )
+            .into());
         }
-        if !stale.is_empty() {
-            for s in &stale {
-                eprintln!("  {s}");
-            }
-            return Err("committed assets are stale — run `cargo xtask assets` and commit".into());
-        }
-        println!("assets are current ({} files)", planned.len());
+        println!("assets are current (stamp {want})");
         return Ok(());
     }
+
+    println!("building wasm → {}", staging.display());
 
     fs::create_dir_all(&dest)?;
     let mut total = 0usize;
@@ -157,6 +162,7 @@ fn assets(check: bool) -> Result<()> {
     // rather than fail: the right response is usually to look at what
     // changed, not to block the build.
     let wasm = fs::metadata(dest.join("chops_search_wasm_bg.wasm"))?.len();
+    fs::write(dest.join(".stamp"), format!("{}\n", input_hash(&root)?))?;
     if wasm > 300 * 1024 {
         eprintln!(
             "warning: wasm blob is {} KB (>300 KB) — check what entered \
@@ -198,4 +204,71 @@ fn demo(rest: &[String]) -> Result<()> {
         return Err("chops-search exited non-zero".into());
     }
     Ok(())
+}
+
+/// Recursively read every file under `dir` into `out`, keyed by path
+/// relative to `root`. Skips nothing: a new file in web/ or src/ changes
+/// the hash, which is the point.
+fn collect(
+    dir: &Path,
+    root: &Path,
+    out: &mut std::collections::BTreeMap<String, Vec<u8>>,
+) -> Result<()> {
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    let mut entries: Vec<_> = fs::read_dir(dir)?.collect::<std::io::Result<Vec<_>>>()?;
+    entries.sort_by_key(|e| e.path());
+    for entry in entries {
+        let path = entry.path();
+        if path.is_dir() {
+            collect(&path, root, out)?;
+        } else {
+            let rel = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/"); // stable across platforms
+            out.insert(rel, fs::read(&path)?);
+        }
+    }
+    Ok(())
+}
+/// Files whose contents determine the embedded runtime. A change to any
+/// of them means `cargo xtask assets` must be re-run.
+fn input_hash(root: &Path) -> Result<String> {
+    use std::collections::BTreeMap;
+
+    let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    for dir in [
+        "crates/chops-search-core/src",
+        "crates/chops-search-wasm/src",
+        "web",
+    ] {
+        collect(&root.join(dir), root, &mut files)?;
+    }
+    for f in [
+        "Cargo.lock",
+        "crates/chops-search-wasm/Cargo.toml",
+        "rust-toolchain.toml",
+    ] {
+        let p = root.join(f);
+        if p.is_file() {
+            files.insert(f.to_string(), fs::read(&p)?);
+        }
+    }
+
+    // BTreeMap gives a stable order; each entry is length-prefixed so two
+    // different splits can't hash alike.
+    let mut h = Sha256::new();
+    for (name, bytes) in &files {
+        h.update((name.len() as u64).to_le_bytes());
+        h.update(name.as_bytes());
+        h.update((bytes.len() as u64).to_le_bytes());
+        h.update(bytes);
+    }
+    Ok(h.finalize()[..8]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
 }
