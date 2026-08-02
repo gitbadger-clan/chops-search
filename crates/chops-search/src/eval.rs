@@ -47,7 +47,6 @@ pub fn eval(
     }
 
     // ---- Artifacts, exactly as the worker fetches them -----------------
-    // ---- Artifacts, exactly as the worker fetches them -----------------
     let a = crate::artifacts::resolve(artifacts)?;
     let meta_bytes = fs::read(&a.meta).with_context(|| format!("{}", a.meta.display()))?;
     let index_bytes = fs::read(&a.index).with_context(|| format!("{}", a.index.display()))?;
