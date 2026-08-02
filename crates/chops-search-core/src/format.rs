@@ -26,9 +26,9 @@
 //! separate file so the eager part is a plain cacheable GET instead of a
 //! range request.
 
+use crate::FormatError;
 use crate::bytes::{Reader, Writer};
 use crate::keyword::KeywordIndex;
-use crate::FormatError;
 use std::collections::HashMap;
 
 const MAGIC_MODEL: &[u8; 4] = b"CHPM";

@@ -54,13 +54,25 @@ mod tests {
     #[test]
     fn single_row() {
         let r = coalesce(&[5], 128, 8);
-        assert_eq!(r, vec![ByteRange { start: 640, end: 768 }]);
+        assert_eq!(
+            r,
+            vec![ByteRange {
+                start: 640,
+                end: 768
+            }]
+        );
     }
 
     #[test]
     fn adjacent_rows_merge() {
         let r = coalesce(&[5, 6, 7], 128, 0);
-        assert_eq!(r, vec![ByteRange { start: 640, end: 1024 }]);
+        assert_eq!(
+            r,
+            vec![ByteRange {
+                start: 640,
+                end: 1024
+            }]
+        );
     }
 
     #[test]
@@ -70,8 +82,14 @@ mod tests {
         assert_eq!(
             r,
             vec![
-                ByteRange { start: 0, end: 10 * 128 },
-                ByteRange { start: 200 * 128, end: 201 * 128 },
+                ByteRange {
+                    start: 0,
+                    end: 10 * 128
+                },
+                ByteRange {
+                    start: 200 * 128,
+                    end: 201 * 128
+                },
             ]
         );
     }

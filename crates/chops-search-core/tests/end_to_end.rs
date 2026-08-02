@@ -58,8 +58,14 @@ fn build_artifacts() -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) {
         dim: DIM as u16,
         global_scale: gscale,
         docs: vec![
-            Doc { url: "/beer-flood/".into(), title: "The London Beer Flood".into() },
-            Doc { url: "/audio/".into(), title: "Audio pipelines".into() },
+            Doc {
+                url: "/beer-flood/".into(),
+                title: "The London Beer Flood".into(),
+            },
+            Doc {
+                url: "/audio/".into(),
+                title: "Audio pipelines".into(),
+            },
         ],
         chunk_doc,
         chunk_vecs,
@@ -150,8 +156,7 @@ fn quantization_fidelity_query_vs_f32() {
     // then compare rankings as a proxy plus direct cosine via store-level
     // math re-derived from artifacts.
     let m = chops_search_core::format::ModelMeta::read(&meta).unwrap();
-    let mut store =
-        chops_search_core::store::RowStore::new(DIM, m.tokens.len(), m.scales.clone());
+    let mut store = chops_search_core::store::RowStore::new(DIM, m.tokens.len(), m.scales.clone());
     store.ingest(0, &rows_file).unwrap();
     let q_vec = store.embed(&ids).unwrap();
 

@@ -359,9 +359,11 @@ mod tests {
             .filter(|t| t.text.as_ref() == "chromium")
             .count();
         assert_eq!(n_chromium, 1);
-        assert!(!terms
-            .iter()
-            .any(|t| t.text.as_ref() == "chromium" && t.expanded));
+        assert!(
+            !terms
+                .iter()
+                .any(|t| t.text.as_ref() == "chromium" && t.expanded)
+        );
     }
 
     #[test]

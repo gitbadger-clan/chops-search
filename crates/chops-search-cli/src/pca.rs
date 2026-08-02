@@ -27,7 +27,10 @@ use nalgebra::{DMatrix, SymmetricEigen};
 /// caller (the CLI) validates the flag before this point.
 pub fn pca_reduce(rows: &[f32], dim: usize, k: usize) -> Vec<f32> {
     assert!(k > 0 && k <= dim, "k must be in 1..=dim");
-    assert!(dim > 0 && rows.len() % dim == 0, "rows not a multiple of dim");
+    assert!(
+        dim > 0 && rows.len() % dim == 0,
+        "rows not a multiple of dim"
+    );
     let n = rows.len() / dim;
     assert!(n > 1, "need at least two rows for PCA");
 

@@ -12,8 +12,8 @@
 //! nothing.
 
 use anyhow::{Context, Result};
-use unicode_normalization::char::is_combining_mark;
 use unicode_normalization::UnicodeNormalization;
+use unicode_normalization::char::is_combining_mark;
 
 #[derive(Debug)]
 pub struct FrontMatter {

@@ -78,7 +78,6 @@ pub fn write_runtime(out: &Path) -> Result<()> {
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

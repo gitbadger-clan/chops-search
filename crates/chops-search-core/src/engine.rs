@@ -14,10 +14,10 @@
 
 use crate::format::{Index, ModelMeta};
 use crate::keyword::KeywordIndex;
-use crate::plan::{coalesce, ByteRange};
+use crate::plan::{ByteRange, coalesce};
 use crate::store::RowStore;
 use crate::wordpiece::Vocab;
-use crate::{rrf, score, FormatError, StoreError};
+use crate::{FormatError, StoreError, rrf, score};
 
 /// Gap (in rows) below which two needed rows share one range request.
 const MAX_GAP_ROWS: u32 = 8;

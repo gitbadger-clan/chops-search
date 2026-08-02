@@ -106,9 +106,17 @@ pub fn init(root: &Path, with_page: bool) -> Result<()> {
     // replace, and duplicate entries are noise in every future diff.
     let gitignore = root.join(".gitignore");
     let existing = fs::read_to_string(&gitignore).unwrap_or_default();
+    // Compare the pattern only. A previously written line may carry a
+    // trailing comment, so a whole-line match would never fire and every
+    // run would append again.
+    let existing_patterns: Vec<&str> = existing
+        .lines()
+        .map(|l| l.split('#').next().unwrap_or("").trim())
+        .filter(|p| !p.is_empty())
+        .collect();
     let missing: Vec<&(&str, &str)> = GITIGNORE_LINES
         .iter()
-        .filter(|(line, _)| !existing.lines().any(|l| l.trim() == *line))
+        .filter(|(line, _)| !existing_patterns.contains(line))
         .collect();
     if missing.is_empty() {
         skipped.push(".gitignore (already covered)".to_string());
@@ -119,7 +127,7 @@ pub fn init(root: &Path, with_page: bool) -> Result<()> {
         }
         out.push_str("\n# chops-search\n");
         for (line, why) in &missing {
-            out.push_str(&format!("{line}    # {why}\n"));
+            out.push_str(&format!("# {why}\n{line}\n"));
         }
         fs::write(&gitignore, out).with_context(|| format!("writing {}", gitignore.display()))?;
         created.push(format!(".gitignore (+{} lines)", missing.len()));
@@ -133,18 +141,23 @@ pub fn init(root: &Path, with_page: bool) -> Result<()> {
     }
 
     println!(
-        "\nNext:\n\
-         \n  1. chops-search model fetch      download the embedding model (~30 MB, once)\
-         \n  2. chops-search build            artifacts + runtime → static/search/\
-         \n  3. zola serve                    then visit /search/\
-         \n\
-         \nFor a search box on EVERY page, add this to your base template\n\
-         (tabi: templates/tabi/extend_head.html) — the script mounts its own\n\
-         overlay when a page has no #chops-input, opened with Ctrl/Cmd-K or /:\n\
-         \n  <link rel=\"stylesheet\" href=\"{{{{ get_url(path='search/chops-search.css') }}}}\">\n\
-             <script defer src=\"{{{{ get_url(path='search/chops-search.js') }}}}\"></script>\n\
-         \nAlso set `build_search_index = false` in config.toml — Zola's own\n\
-         index is dead weight alongside this one.\n"
+        r#"
+Next:
+
+  1. chops-search model fetch      download the embedding model (~30 MB, once)
+  2. chops-search build            artifacts + runtime -> static/search/
+  3. zola serve                    then visit /search/
+
+For a search box on EVERY page, add this to your base template
+(tabi: templates/tabi/extend_head.html). The script mounts its own overlay
+on pages with no #chops-input, opened with Ctrl/Cmd-K or /:
+
+  <link rel="stylesheet" href="{{{{ get_url(path='search/chops-search.css') }}}}">
+  <script defer src="{{{{ get_url(path='search/chops-search.js') }}}}"></script>
+
+Also set `build_search_index = false` in config.toml. Zola's own index is
+dead weight alongside this one.
+"#
     );
     Ok(())
 }

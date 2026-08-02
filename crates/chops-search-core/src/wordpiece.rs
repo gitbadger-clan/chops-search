@@ -27,8 +27,8 @@
 //! blob; the parity survey reports the gap instead of hiding it.
 
 use std::collections::HashMap;
-use unicode_normalization::char::is_combining_mark;
 use unicode_normalization::UnicodeNormalization;
+use unicode_normalization::char::is_combining_mark;
 /// HF WordPiece refuses words longer than this, emitting [UNK] without
 /// attempting to segment. Since chops-search deletes rather than [UNK]s, the
 /// equivalent is returning None. Value is potion's

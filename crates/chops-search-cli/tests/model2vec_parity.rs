@@ -46,13 +46,13 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 #[test]
 #[ignore = "needs model files; set CHOPS_SEARCH_MODEL_DIR and run with --ignored"]
 fn embeddings_match_official_implementation() {
-    let dir = std::env::var("CHOPS_SEARCH_MODEL_DIR")
-        .expect("set CHOPS_SEARCH_MODEL_DIR to a dir with tokenizer.json + model.safetensors + config.json");
+    let dir = std::env::var("CHOPS_SEARCH_MODEL_DIR").expect(
+        "set CHOPS_SEARCH_MODEL_DIR to a dir with tokenizer.json + model.safetensors + config.json",
+    );
 
     // Our path: the exact code the browser runs (chops-search-core), fed by the
     // exact loader the build tool runs (chops-search-cli).
-    let (tokens, rows, dim) =
-        load_model2vec(dir.as_ref()).expect("chops loader failed");
+    let (tokens, rows, dim) = load_model2vec(dir.as_ref()).expect("chops loader failed");
     let vocab = Vocab::from_tokens(&tokens);
 
     // Reference path: official crate, normalization forced ON to match
@@ -97,8 +97,7 @@ fn single_words_match_official_implementation() {
     let dir = std::env::var("CHOPS_SEARCH_MODEL_DIR").expect("set CHOPS_SEARCH_MODEL_DIR");
     let (tokens, rows, dim) = load_model2vec(dir.as_ref()).expect("load");
     let vocab = Vocab::from_tokens(&tokens);
-    let official =
-        StaticModel::from_pretrained(&dir, None, Some(true), None).expect("official");
+    let official = StaticModel::from_pretrained(&dir, None, Some(true), None).expect("official");
 
     let words = ["café", "Running", "filters", "guantanamo", "the", "won't"];
     let inputs: Vec<String> = words.iter().map(|s| s.to_string()).collect();

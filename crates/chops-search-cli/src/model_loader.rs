@@ -6,15 +6,15 @@
 use std::fs;
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 /// Read tokenizer.json + model.safetensors from a model2vec model dir.
 /// Returns (tokens ordered by id, f32 rows, dim).
 pub fn load_model2vec(dir: &Path) -> Result<(Vec<String>, Vec<f32>, usize)> {
     // Vocab from tokenizer.json → model.vocab: { token: id }.
     let tok_path = dir.join("tokenizer.json");
-    let tok_raw = fs::read_to_string(&tok_path)
-        .with_context(|| format!("reading {}", tok_path.display()))?;
+    let tok_raw =
+        fs::read_to_string(&tok_path).with_context(|| format!("reading {}", tok_path.display()))?;
     let tok_json: serde_json::Value = serde_json::from_str(&tok_raw)?;
     let vocab_obj = tok_json
         .pointer("/model/vocab")
@@ -37,8 +37,7 @@ pub fn load_model2vec(dir: &Path) -> Result<(Vec<String>, Vec<f32>, usize)> {
 
     // Embedding matrix from safetensors.
     let st_path = dir.join("model.safetensors");
-    let st_raw =
-        fs::read(&st_path).with_context(|| format!("reading {}", st_path.display()))?;
+    let st_raw = fs::read(&st_path).with_context(|| format!("reading {}", st_path.display()))?;
     let st = safetensors::SafeTensors::deserialize(&st_raw)?;
     // model2vec names the tensor "embeddings"; fall back to the sole tensor.
     let names = st.names();
