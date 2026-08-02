@@ -25,7 +25,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use sha2::{Digest, Sha256};
 
@@ -591,11 +591,7 @@ fn strip_date_prefix(name: &str) -> &str {
         return name;
     }
     let rest = &name[11..];
-    if rest.is_empty() {
-        name
-    } else {
-        rest
-    }
+    if rest.is_empty() { name } else { rest }
 }
 /// Map a content-relative path + front matter to the URL Zola will give
 /// the page, replicating Zola's defaults: `path` override wins outright;
