@@ -24,3 +24,18 @@ codegen-units = 1
 panic = "abort"
 
 # panic = "abort" breaks `cargo test --release`; tests run in dev profile.
+# The override that comment anticipated. `opt-level = "z"` is right for
+# the wasm blob shipping to browsers and wrong for a native binary doing
+# an eigendecomposition: nalgebra's PCA is the slowest part of `build`,
+# and it runs on every content change.
+[profile.release.package.chops-search]
+opt-level = 3
+
+[profile.release.package.nalgebra]
+opt-level = 3
+
+[profile.release.package.safetensors]
+opt-level = 3
+
+[profile.release.package.flate2]
+opt-level = 3
