@@ -5,7 +5,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/gitbadger-clan/chops-search"
 authors = ["Artur Daschevici"]
 # Cargo won't publish without this; pick the oldest you actually test on.
-rust-version = "1.85"
+rust-version = "1.97"
 
 [workspace]
 resolver = "2"
