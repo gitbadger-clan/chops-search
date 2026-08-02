@@ -152,7 +152,6 @@ pub fn install_hint(shell: clap_complete::Shell) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     #[test]
     fn kind_candidates_survive_a_missing_query_set() {
@@ -174,10 +173,9 @@ mod tests {
 
     #[test]
     fn model_candidates_are_all_potion_repos() {
-        // A typo here sends someone to a 404 from a Tab press.
-        let cands = model_candidates();
-        let _ = cands; // constructed without panicking
+        for c in model_candidates().candidates() {
+            let v = c.get_value().to_string_lossy();
+            assert!(v.starts_with("minishlab/potion-"), "{v}");
+        }
     }
-
-    fn _unused(_: &Path) {}
 }
