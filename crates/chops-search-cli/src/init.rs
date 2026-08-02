@@ -142,7 +142,7 @@ pub fn init(root: &Path, with_page: bool) -> Result<()> {
          (tabi: templates/tabi/extend_head.html) — the script mounts its own\n\
          overlay when a page has no #chops-input, opened with Ctrl/Cmd-K or /:\n\
          \n  <link rel=\"stylesheet\" href=\"{{{{ get_url(path='search/chops-search.css') }}}}\">\n\
-         \n  <script defer src=\"{{{{ get_url(path='search/chops-search.js') }}}}\"></script>\n\
+             <script defer src=\"{{{{ get_url(path='search/chops-search.js') }}}}\"></script>\n\
          \nAlso set `build_search_index = false` in config.toml — Zola's own\n\
          index is dead weight alongside this one.\n"
     );
