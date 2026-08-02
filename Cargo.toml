@@ -12,7 +12,8 @@ resolver = "2"
 members = [
     "crates/chops-search-core",
     "crates/chops-search",
-    "crates/chops-search-wasm", "xtask",
+    "crates/chops-search-wasm",
+    "xtask",
 ]
 
 # Size discipline for the wasm blob. The CLI also inherits this; if build
