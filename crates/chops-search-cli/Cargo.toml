@@ -1,5 +1,5 @@
 [package]
-name = "chops-search-cli"
+name = "chops-search"
 description = "Build tool for chops-search: turns a Zola content tree and a model2vec model into static search artifacts."
 version.workspace = true
 edition.workspace = true
