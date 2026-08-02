@@ -78,9 +78,31 @@ fn assets(check: bool) -> Result<()> {
     let dest = root.join("crates/chops-search/assets");
     let staging = root.join("target/xtask-wasm");
 
+    // Stamp comparison first: --check must not need wasm-pack, and
+    // rebuilding to compare bytes was never reliable across machines
+    // (absolute paths in panic metadata, differing wasm-opt versions).
+    if check {
+        let want = input_hash(&root)?;
+        let got = fs::read_to_string(dest.join(".stamp")).unwrap_or_default();
+        if got.trim() != want {
+            return Err(format!(
+                "assets are stale: sources hash {want}, stamp says {}\n\
+                 run `cargo xtask assets` and commit",
+                if got.trim().is_empty() {
+                    "(missing)"
+                } else {
+                    got.trim()
+                }
+            )
+            .into());
+        }
+        println!("assets are current (stamp {want})");
+        return Ok(());
+    }
+
     // Build into a staging directory rather than straight into assets/,
     // so a failed or partial wasm-pack run can't leave the committed
-    // tree half-updated — and so --check has something to diff against.
+    // tree half-updated.
     println!("building wasm → {}", staging.display());
     let status = Command::new("wasm-pack")
         .current_dir(&root)
@@ -108,30 +130,6 @@ fn assets(check: bool) -> Result<()> {
     for name in WEB_FILES {
         planned.push((root.join("web").join(name), dest.join(name)));
     }
-
-    // Stamp comparison first: --check must not need wasm-pack, and
-    // rebuilding to compare bytes was never reliable across machines
-    // (absolute paths in panic metadata, differing wasm-opt versions).
-    if check {
-        let want = input_hash(&root)?;
-        let got = fs::read_to_string(dest.join(".stamp")).unwrap_or_default();
-        if got.trim() != want {
-            return Err(format!(
-                "assets are stale: sources hash {want}, stamp says {}\n\
-                 run `cargo xtask assets` and commit",
-                if got.trim().is_empty() {
-                    "(missing)"
-                } else {
-                    got.trim()
-                }
-            )
-            .into());
-        }
-        println!("assets are current (stamp {want})");
-        return Ok(());
-    }
-
-    println!("building wasm → {}", staging.display());
 
     fs::create_dir_all(&dest)?;
     let mut total = 0usize;
