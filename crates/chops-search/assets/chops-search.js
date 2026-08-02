@@ -192,7 +192,11 @@ function wireInput() {
 
 function move(delta) {
   if (rows.length === 0) return;
-  select((selected + delta + rows.length + (selected < 0 ? 1 : 0)) % rows.length);
+  if (selected < 0) {
+    select(delta > 0 ? 0 : rows.length - 1);
+    return;
+  }
+  select((selected + delta + rows.length) % rows.length);
 }
 
 function select(i) {
