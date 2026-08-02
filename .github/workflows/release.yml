@@ -1,19 +1,20 @@
 name: Release
 
-# Publishes to crates.io when a v* tag is pushed. Everything here is a
-# gate: by the time `cargo publish` runs, the tag has been checked against
-# the manifest version, the embedded runtime has been proven current, and
-# the packaged file list has been proven to contain the assets that
-# `include_bytes!` needs.
+# Publishes to crates.io and attaches prebuilt binaries to a GitHub
+# release when a v* tag is pushed. Everything before those two steps is a
+# gate: the tag is checked against the manifest version, the embedded
+# runtime is proven current, and the packaged file list is proven to
+# contain the assets `include_bytes!` needs.
 #
-# That last check exists because of a failure mode specific to this crate:
+# That last check exists because of a failure mode specific to this crate.
 # `cargo publish` excludes gitignored files, and the CLI embeds its wasm
-# runtime at compile time. A .gitignore rule that swallowed assets/ would
-# publish a crate that builds fine locally and fails for every user.
+# runtime at compile time, so a .gitignore rule that swallowed assets/
+# would publish a crate that builds locally and fails for every user.
 #
 #   git tag v0.1.0 && git push origin v0.1.0
 #
-# Dry-run it first with the workflow_dispatch trigger.
+# Dry-run it first with workflow_dispatch: that runs every gate and builds
+# every binary, but publishes nothing.
 
 on:
   push:
@@ -21,16 +22,13 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: 'Package and verify without publishing'
+        description: 'Verify and build without publishing'
         type: boolean
         default: true
 
 permissions:
-  contents: read
-  # Required by crates.io Trusted Publishing (OIDC). No long-lived
-  # CARGO_REGISTRY_TOKEN secret to leak or rotate; configure the repo as a
-  # trusted publisher in each crate's crates.io settings first.
-  id-token: write
+  contents: write   # creating the GitHub release
+  id-token: write   # crates.io Trusted Publishing (OIDC)
 
 env:
   CARGO_TERM_COLOR: always
@@ -55,8 +53,8 @@ jobs:
           echo "version=$v" >> "$GITHUB_OUTPUT"
           echo "manifest version: $v"
 
-      # A tag that disagrees with the manifest publishes the wrong number
-      # and can't be undone — crates.io versions are permanent.
+      # A tag disagreeing with the manifest publishes the wrong number and
+      # cannot be undone, since crates.io versions are permanent.
       - name: Tag matches manifest
         if: startsWith(github.ref, 'refs/tags/')
         run: |
@@ -68,16 +66,11 @@ jobs:
 
       - run: cargo test --workspace
 
-      # The embedded runtime must match the source it was built from, or
-      # users get an engine that disagrees with the artifacts the same
-      # binary writes.
-      - name: Install wasm-pack
-        run: cargo install wasm-pack --locked
       - name: Embedded assets are current
         run: cargo xtask assets --check
 
       # `cargo publish` drops gitignored files. Prove the assets survive
-      # packaging rather than discovering it from a user's bug report.
+      # packaging rather than learning it from a user's bug report.
       - name: Packaged files include the runtime
         run: |
           cargo package -p chops-search --allow-dirty --list > /tmp/files.txt
@@ -101,8 +94,78 @@ jobs:
           cargo package -p chops-search-core
           cargo package -p chops-search
 
-  publish:
+  # Prebuilt binaries matter more here than for most crates: `cargo
+  # install` compiles nalgebra and safetensors from source, which is a
+  # slow first impression for someone just trying the tool. Runs on
+  # dry-runs too, since cross-platform breakage is exactly what a dry run
+  # should catch.
+  binaries:
     needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-13
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # strip via config rather than the profile: the workspace release
+      # profile is tuned for wasm size and shared with the wasm crate.
+      - name: Build
+        run: >
+          cargo build --release -p chops-search
+          --target ${{ matrix.target }}
+          --config profile.release.strip=true
+
+      - name: Package (unix)
+        if: matrix.os != 'windows-latest'
+        shell: bash
+        run: |
+          name="chops-search-v${{ needs.verify.outputs.version }}-${{ matrix.target }}"
+          mkdir "$name"
+          cp target/${{ matrix.target }}/release/chops-search "$name/"
+          cp README.md LICENSE-MIT LICENSE-APACHE "$name/"
+          tar czf "$name.tar.gz" "$name"
+          shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+
+      - name: Package (windows)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          name="chops-search-v${{ needs.verify.outputs.version }}-${{ matrix.target }}"
+          mkdir "$name"
+          cp target/${{ matrix.target }}/release/chops-search.exe "$name/"
+          cp README.md LICENSE-MIT LICENSE-APACHE "$name/"
+          7z a "$name.zip" "$name"
+          sha256sum "$name.zip" > "$name.zip.sha256"
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            chops-search-v*.tar.gz
+            chops-search-v*.zip
+            chops-search-v*.sha256
+          if-no-files-found: error
+
+  publish:
+    needs: [verify, binaries]
     if: startsWith(github.ref, 'refs/tags/') && !inputs.dry_run
     runs-on: ubuntu-latest
     steps:
@@ -117,7 +180,7 @@ jobs:
       # Dependency order: the CLI's path dependency on core becomes a
       # version requirement once published, so core must exist on the
       # index first. `--no-verify` on the CLI skips a rebuild that already
-      # passed in `verify` — and would otherwise fail while core is still
+      # passed in `verify`, and would otherwise fail while core is still
       # propagating.
       - name: Publish chops-search-core
         env:
@@ -141,3 +204,54 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: cargo publish -p chops-search --no-verify
+
+  # Last, and only after crates.io succeeded: a GitHub release announcing
+  # a version that failed to publish would be worse than no release.
+  github-release:
+    needs: [verify, binaries, publish]
+    if: startsWith(github.ref, 'refs/tags/') && !inputs.dry_run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v6
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Assemble notes
+        run: |
+          v="${{ needs.verify.outputs.version }}"
+          {
+            echo "## Install"
+            echo
+            echo '```'
+            echo "cargo install chops-search"
+            echo '```'
+            echo
+            echo "Or download a binary below. Verify it with the matching"
+            echo '`.sha256` file, then put `chops-search` on your PATH.'
+            echo
+            # A CHANGELOG section for this version wins over generated
+            # notes: a curated list of what changed is worth more than a
+            # list of commit subjects.
+            if [ -f CHANGELOG.md ] && grep -q "## \[\?$v" CHANGELOG.md; then
+              echo "## Changes"
+              echo
+              awk "/^## \[?$v/{f=1;next} /^## /{f=0} f" CHANGELOG.md
+            fi
+          } > /tmp/notes.md
+          cat /tmp/notes.md
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v="${{ needs.verify.outputs.version }}"
+          # --generate-notes appends the commit list under whatever we
+          # wrote, so a CHANGELOG section and the automatic list coexist.
+          gh release create "v$v" \
+            --title "chops-search v$v" \
+            --notes-file /tmp/notes.md \
+            --generate-notes \
+            dist/*
