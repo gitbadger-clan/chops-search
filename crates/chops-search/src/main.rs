@@ -184,7 +184,7 @@ fn main() -> Result<()> {
             dims,
             no_runtime,
         } => {
-            let cfg = Config::discover(&std::env::current_dir()?)?.with_overrides(
+            let cfg = load_config(&site)?.with_overrides(
                 content,
                 out,
                 model,
