@@ -19,7 +19,7 @@ name = "chops-search"
 path = "src/main.rs"
 
 [dependencies]
-chops-search-core = { path = "../chops-search-core" }
+chops-search-core = { path = "../chops-search-core", version = "0.1.0" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 # tokenizer.json parsing only — never enters the wasm build.
