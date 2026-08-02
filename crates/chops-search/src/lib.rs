@@ -4,6 +4,7 @@
 
 pub mod artifacts;
 pub mod assets;
+pub mod completion;
 pub mod config;
 pub mod eval;
 pub mod explain;

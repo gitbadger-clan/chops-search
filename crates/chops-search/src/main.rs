@@ -15,9 +15,8 @@
 //! from the working directory; flags override it. See config.rs.
 //!
 //! Expects a local model directory containing `tokenizer.json` and
-//! `model.safetensors` (e.g. `hf download minishlab/potion-base-8M
-//! --local-dir .chops-search/model`). No network access here; fetching the
-//! model is deliberately a separate step, so a build can never fail
+//! `model.safetensors`. `chops-search model fetch` puts one there. No
+//! network access in `build`, deliberately, so a build can never fail
 //! because an upstream repo moved.
 
 use std::collections::HashMap;
@@ -26,10 +25,11 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use sha2::{Digest, Sha256};
 
 use chops_search::assets;
+use chops_search::completion;
 use chops_search::config::Config;
 use chops_search::frontmatter::{self, FrontMatter};
 use chops_search::model_loader::load_model2vec;
@@ -42,15 +42,39 @@ use chops_search_core::format::{Doc, Index, ModelMeta};
 use chops_search_core::keyword::keyword_words;
 use chops_search_core::wordpiece::Vocab;
 
+const AFTER_HELP: &str = "\
+EXAMPLES
+  chops-search init                     scaffold a Zola site
+  chops-search model fetch              download the embedding model
+  chops-search build                    artifacts + runtime -> static/search/
+
+  chops-search docs                     list indexed URLs
+  chops-search query \"why this rank\"     explain a ranking
+  chops-search eval --fail-under 0.85   gate on recall@1
+
+  COMPLETE=fish chops-search | source   completions for this session
+
+Docs: https://github.com/gitbadger-clan/chops-search";
+
 #[derive(Parser)]
 #[command(
     name = "chops-search",
-    about = "Static-site hybrid search index builder"
+    version,
+    about = "Hybrid keyword + semantic search for static sites",
+    long_about = "\
+Builds a browser-side search index for a static site: BM25 over keyword \
+postings fused with cosine similarity over model2vec embeddings, served \
+as static files and queried without a server.
+
+Run `chops-search init` in a Zola site to get started.",
+    after_help = AFTER_HELP
 )]
 struct Cli {
-    /// Directory to resolve chops-search.toml from. Defaults to the
-    /// working directory, walking up as cargo does for Cargo.toml.
-    #[arg(long, global = true)]
+    /// Site directory to resolve chops-search.toml from.
+    ///
+    /// Defaults to the working directory, searching upward the way cargo
+    /// finds Cargo.toml. Useful from a repo root, or in CI.
+    #[arg(long, global = true, value_name = "DIR", add = completion::site_candidates())]
     site: Option<PathBuf>,
 
     #[command(subcommand)]
@@ -60,106 +84,211 @@ struct Cli {
 #[derive(Subcommand)]
 enum ModelCmd {
     /// Download a model2vec model and write the lockfile.
+    #[command(long_about = "\
+Downloads a model2vec model and records exactly what landed in a lockfile \
+beside the model directory.
+
+Commit the lockfile and gitignore the model itself: the lock is what makes \
+a build reproducible, and the weights are ~30 MB.")]
     Fetch {
-        /// HuggingFace repo, e.g. minishlab/potion-base-8M.
-        #[arg(default_value = "minishlab/potion-base-8M")]
+        /// HuggingFace repo.
+        ///
+        /// Any model2vec model works; the listed ones are tested.
+        #[arg(
+            default_value = "minishlab/potion-base-8M",
+            value_name = "REPO",
+            add = completion::model_candidates()
+        )]
         repo: String,
-        /// Exact revision to pin. Defaults to the current default branch,
-        /// resolved to a commit so the lock stays reproducible.
-        #[arg(long)]
+        /// Exact revision to pin.
+        ///
+        /// Defaults to the repo's current default branch, resolved to a
+        /// commit so the lockfile pins something immutable.
+        #[arg(long, value_name = "SHA")]
         revision: Option<String>,
-        /// Destination. Defaults to `model` from chops-search.toml.
-        #[arg(long)]
+        /// Destination. Default: `model` from chops-search.toml.
+        #[arg(long, value_name = "DIR")]
         dir: Option<PathBuf>,
     },
     /// Re-hash the model against its lockfile. No network.
+    #[command(long_about = "\
+Verifies the model on disk matches the committed lockfile.
+
+Catches a partial download, a corrupted blob, or a model swapped without \
+updating the lock. Worth running in CI before a build, since the failure \
+it prevents (building against different weights than the lock claims) \
+surfaces days later as a confusing recall change.")]
     Verify {
-        #[arg(long)]
+        /// Model directory. Default: `model` from chops-search.toml.
+        #[arg(long, value_name = "DIR")]
         dir: Option<PathBuf>,
     },
 }
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Build all search artifacts from a content tree and a model2vec model.
-    Build {
-        /// Zola content directory (walked recursively for .md files).
-        #[arg(long)]
-        content: Option<PathBuf>,
-        /// Directory containing tokenizer.json and model.safetensors.
-        #[arg(long)]
-        model: Option<PathBuf>,
-        /// Output directory (e.g. static/search).
-        #[arg(long)]
-        out: Option<PathBuf>,
-        /// Rows bundled eagerly in model.prefix.i8.
-        #[arg(long)]
-        prefix_rows: Option<u32>,
-        /// Target chunk size in characters.
-        #[arg(long)]
-        chunk_chars: Option<usize>,
-        /// Reduce embedding dimensionality via PCA before quantization
-        /// (e.g. 128 halves the shipped matrix). Defaults to the model's
-        /// native dimensionality.
-        #[arg(long)]
-        dims: Option<usize>,
+    /// Scaffold a site: config, search page, .gitignore entries.
+    #[command(long_about = "\
+Writes chops-search.toml, a /search/ page, and .gitignore entries, then \
+prints the template snippet for a site-wide search box.
 
-        /// Artifacts only — skip the wasm + JS runtime. For CI jobs that
-        /// rebuild the index without shipping a new frontend.
+Nothing is ever overwritten. Re-running after editing the scaffold is \
+safe and reports what it skipped.")]
+    Init {
+        /// Skip content/search.md.
+        ///
+        /// For sites using only the site-wide overlay, where a dedicated
+        /// search page would be redundant.
         #[arg(long)]
-        no_runtime: bool,
-    },
-    /// Explain a query against built artifacts: keyword scores, best-chunk
-    /// cosines, chunk counts, and RRF contributions per document.
-    Query {
-        /// Directory containing the built artifacts (the --out of `build`).
-        #[arg(long)]
-        artifacts: Option<PathBuf>,
-        /// Max rows to print.
-        #[arg(long, default_value_t = 20)]
-        limit: usize,
-        /// The query string.
-        query: String,
-    },
-    /// Score the engine against a labeled query set (recall@1 by kind).
-    Eval {
-        /// Directory containing the built artifacts.
-        #[arg(long)]
-        artifacts: Option<PathBuf>,
-        /// Labeled query set.
-        #[arg(long)]
-        queries: Option<PathBuf>,
-        /// Only run cases of this kind (exact, paraphrase, navigational, negative).
-        #[arg(long)]
-        kind: Option<String>,
-        /// Exit non-zero if overall recall@1 falls below this fraction (0.0–1.0).
-        #[arg(long, default_value_t = 0.0)]
-        fail_under: f32,
-        /// Minimum raw best-chunk similarity (semantic floor).
-        #[arg(long)]
-        min_cos: Option<f32>,
-        /// Coefficient on the √(2 ln n) chunk-count correction.
-        #[arg(long)]
-        chunk_penalty: Option<f32>,
+        no_page: bool,
     },
 
-    /// Fetch or verify the embedding model.
+    /// Download or verify the embedding model.
+    #[command(long_about = "\
+Fetches a model2vec model and records what landed in a lockfile.
+
+This is the only command that touches the network. `build` reads a \
+directory and nothing else, so a build can never fail because an upstream \
+repo moved or went down.")]
     Model {
         #[command(subcommand)]
         action: ModelCmd,
     },
 
-    /// List indexed documents and their URLs — what you need to write
-    /// `expect` entries after adding a post.
-    Docs {
+    /// Build search artifacts and the browser runtime.
+    #[command(long_about = "\
+Reads the content tree and the model, writes hashed artifacts plus the \
+wasm engine, worker, page script, and stylesheet into the output \
+directory.
+
+Content changes touch only index.bin and snippets.bin. The model files \
+change when the model does, and the wasm caches across every deploy.")]
+    Build {
+        /// Content directory. Default: `content` from chops-search.toml.
+        #[arg(long, value_name = "DIR")]
+        content: Option<PathBuf>,
+        /// Model directory. Default: `model` from chops-search.toml.
+        #[arg(long, value_name = "DIR")]
+        model: Option<PathBuf>,
+        /// Output directory. Default: `out` from chops-search.toml.
+        #[arg(long, value_name = "DIR")]
+        out: Option<PathBuf>,
+        /// Rows bundled eagerly, covering most queries without a fetch.
+        ///
+        /// Default 2048. Larger means a bigger eager payload and fewer
+        /// range requests.
+        #[arg(long, value_name = "N")]
+        prefix_rows: Option<u32>,
+        /// Target chunk size in characters. Default 600.
+        ///
+        /// Smaller chunks sharpen rare-word signal and cost more vectors.
+        #[arg(long, value_name = "N")]
+        chunk_chars: Option<usize>,
+        /// PCA target dimensionality. Default 128; native size is 256.
+        ///
+        /// Halves the eager prefix and every range fetch, at some cost in
+        /// recall. Re-run `eval` after changing it.
+        #[arg(long, value_name = "N")]
+        dims: Option<usize>,
+        /// Artifacts only; skip the wasm and JS runtime.
+        ///
+        /// For CI jobs that rebuild an index without shipping a new
+        /// frontend.
         #[arg(long)]
+        no_runtime: bool,
+    },
+
+    /// List indexed documents and their URLs.
+    #[command(long_about = "\
+Prints every indexed document with its URL and chunk count.
+
+The URLs are what `eval` expectations must match, so this is the command \
+to run after adding a post. A mistyped expectation reads as a ranking \
+failure rather than a typo, which is a bad afternoon.")]
+    Docs {
+        /// Artifacts directory. Default: `out` from chops-search.toml.
+        #[arg(long, value_name = "DIR")]
         artifacts: Option<PathBuf>,
     },
-    /// Scaffold chops-search.toml, a search page, and gitignore entries.
-    Init {
-        /// Skip content/search.md — for sites using only the overlay.
-        #[arg(long)]
-        no_page: bool,
+
+    /// Explain why a query ranked the way it did.
+    #[command(long_about = "\
+Prints the evidence behind a ranking: how the query tokenized on both \
+sides, per-term keyword scores with document frequencies, best-chunk \
+cosine per document, and each engine's contribution to the fused order.
+
+This is the diagnostic tool. When a result looks wrong, the answer is \
+almost always visible in the chunk count or the term frequencies.")]
+    Query {
+        /// The query string.
+        #[arg(value_name = "QUERY")]
+        query: String,
+        /// Artifacts directory. Default: `out` from chops-search.toml.
+        #[arg(long, value_name = "DIR")]
+        artifacts: Option<PathBuf>,
+        /// Rows to print. Default 20.
+        #[arg(long, value_name = "N", default_value_t = 20)]
+        limit: usize,
+    },
+
+    /// Score the engine against a labelled query set.
+    #[command(long_about = "\
+Runs a labelled query set through the real engine over the real byte path \
+(plan, range-fetch, ingest, search) and reports recall@1 and recall@3 by \
+query kind.
+
+Because it drives the actual loading logic, a bug in range planning shows \
+up as a recall drop rather than hiding. The reported bytes-per-query are \
+the real ones.")]
+    Eval {
+        /// Artifacts directory. Default: `out` from chops-search.toml.
+        #[arg(long, value_name = "DIR")]
+        artifacts: Option<PathBuf>,
+        /// Query set. Default: fixtures/queries.toml beside the config.
+        #[arg(long, value_name = "FILE")]
+        queries: Option<PathBuf>,
+        /// Only run cases of this kind.
+        ///
+        /// Candidates are read from the query set, so they reflect
+        /// whatever kinds it actually uses.
+        #[arg(long, value_name = "KIND", add = completion::kind_candidates())]
+        kind: Option<String>,
+        /// Exit non-zero below this recall@1 fraction. Default 0.0.
+        ///
+        /// Set it just under your current baseline in CI: high enough to
+        /// catch a regression, low enough that one flipped case in a
+        /// small set does not fail the build.
+        #[arg(long, value_name = "FRACTION", default_value_t = 0.0)]
+        fail_under: f32,
+        /// Minimum best-chunk cosine for semantic relevance. Default 0.20.
+        ///
+        /// For sweeping the relevance floor. Below it a document counts
+        /// as unrelated, which is what makes empty results possible.
+        #[arg(long, value_name = "COS")]
+        min_cos: Option<f32>,
+        /// Coefficient on the chunk-count correction. Default 0.02.
+        ///
+        /// For sweeping. Longer documents get more chances at a high
+        /// max-pooled score; this corrects the bias. 0 disables it.
+        #[arg(long, value_name = "COEFF")]
+        chunk_penalty: Option<f32>,
+    },
+
+    /// Emit a shell completion script.
+    #[command(long_about = "\
+Writes a conventional completion script to stdout.
+
+Prefer the dynamic path where your shell supports it, since it computes \
+candidates at completion time (so `--kind` lists the kinds your query set \
+actually uses):
+
+  fish:  echo 'COMPLETE=fish chops-search | source' >> ~/.config/fish/config.fish
+  zsh:   echo 'source <(COMPLETE=zsh chops-search)' >> ~/.zshrc
+  bash:  echo 'source <(COMPLETE=bash chops-search)' >> ~/.bashrc")]
+    Completions {
+        /// Shell to generate for.
+        #[arg(value_name = "SHELL")]
+        shell: clap_complete::Shell,
     },
 }
 
@@ -172,6 +301,11 @@ fn load_config(site: &Option<PathBuf>) -> Result<Config> {
 }
 
 fn main() -> Result<()> {
+    // Must run before Cli::parse. When the shell invokes us for
+    // completions this exits early, so a half-typed command line never
+    // reaches clap as a parse error.
+    clap_complete::CompleteEnv::with_factory(Cli::command).complete();
+
     let cli = Cli::parse();
     let site = cli.site;
     match cli.cmd {
@@ -253,6 +387,11 @@ fn main() -> Result<()> {
                 None => std::env::current_dir()?,
             };
             chops_search::init::init(&root, !no_page)
+        }
+        Cmd::Completions { shell } => {
+            completion::generate(shell, &mut Cli::command());
+            eprintln!("{}", completion::install_hint(shell));
+            Ok(())
         }
     }
 }
@@ -591,6 +730,7 @@ fn strip_date_prefix(name: &str) -> &str {
     let rest = &name[11..];
     if rest.is_empty() { name } else { rest }
 }
+
 /// Map a content-relative path + front matter to the URL Zola will give
 /// the page, replicating Zola's defaults: `path` override wins outright;
 /// `slug` replaces the final segment; page bundles collapse (`foo/index.md`
@@ -598,7 +738,7 @@ fn strip_date_prefix(name: &str) -> &str {
 ///
 /// Known limitations, documented rather than guessed at: multilingual
 /// suffixes (`foo.fr.md`) and per-section path overrides in ancestor
-/// `_index.md` files are not handled — neither occurs on this site.
+/// `_index.md` files are not handled.
 fn url_for(rel: &Path, fm: &FrontMatter) -> String {
     if let Some(p) = &fm.path {
         let p = p.trim_matches('/');
@@ -698,6 +838,14 @@ mod tests {
 
     fn fm() -> FrontMatter {
         FrontMatter::default()
+    }
+
+    /// Catches conflicting arg names, bad defaults, and missing value
+    /// names. Cheap insurance around the completion work, which touches
+    /// every argument declaration.
+    #[test]
+    fn cli_definition_is_valid() {
+        Cli::command().debug_assert();
     }
 
     #[test]
