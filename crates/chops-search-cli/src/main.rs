@@ -155,6 +155,12 @@ enum Cmd {
         #[arg(long)]
         artifacts: Option<PathBuf>,
     },
+    /// Scaffold chops-search.toml, a search page, and gitignore entries.
+    Init {
+        /// Skip content/search.md — for sites using only the overlay.
+        #[arg(long)]
+        no_page: bool,
+    },
 }
 
 fn load_config(site: &Option<PathBuf>) -> Result<Config> {
@@ -242,6 +248,13 @@ fn main() -> Result<()> {
         Cmd::Docs { artifacts } => {
             let cfg = load_config(&site)?;
             chops_search_cli::explain::list_docs(&artifacts.unwrap_or(cfg.out))
+        }
+        Cmd::Init { no_page } => {
+            let root = match &site {
+                Some(p) => p.clone(),
+                None => std::env::current_dir()?,
+            };
+            chops_search_cli::init::init(&root, !no_page)
         }
     }
 }
