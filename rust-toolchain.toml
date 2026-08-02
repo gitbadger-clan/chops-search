@@ -1,0 +1,6 @@
+[toolchain]
+# Pinned rather than floating: `nightly` alone means CI can break from a
+# compiler change on a day you didn't touch the code. Bump deliberately.
+channel = "nightly-2026-08-01"
+components = ["clippy", "rustfmt", "rust-src"]
+targets = ["wasm32-unknown-unknown"]
