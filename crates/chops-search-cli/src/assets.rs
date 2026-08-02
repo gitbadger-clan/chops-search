@@ -78,19 +78,6 @@ pub fn write_runtime(out: &Path) -> Result<()> {
     Ok(())
 }
 
-/// A snippet for the user's Zola template — printed by `chops-search
-/// init` rather than written, because where it goes depends on the theme.
-pub const ZOLA_SNIPPET: &str = r#"<!-- chops-search: paste into your search page or template -->
-<div class="chops">
-  <input id="chops-input" type="search" placeholder="Search…"
-         autocomplete="off" spellcheck="false"
-         role="combobox" aria-expanded="false" aria-controls="chops-results"
-         aria-autocomplete="list">
-  <span id="chops-mode" aria-live="polite"></span>
-  <ul id="chops-results" role="listbox"></ul>
-</div>
-<script src="{{ get_url(path='search/chops-search.js') }}"></script>
-"#;
 
 #[cfg(test)]
 mod tests {
