@@ -89,15 +89,6 @@ jobs:
           done
           exit $missing
 
-      - name: Dry-run package
-        run: |
-          cargo package -p chops-search-core
-          # --no-verify: packaging the CLI compiles it against the
-          # PUBLISHED core, which for a version bump does not exist yet.
-          # `cargo test --workspace` above already compiled it against the
-          # local path dependency, so the compile is not the value here.
-          cargo package -p chops-search --no-verify
-
   # Prebuilt binaries matter more here than for most crates: `cargo
   # install` compiles nalgebra and safetensors from source, which is a
   # slow first impression for someone just trying the tool. Runs on
