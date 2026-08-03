@@ -37,12 +37,6 @@
 //! would let a long document's penalty push it below the relevance floor,
 //! which is a different claim than the penalty is licensed to make.
 
-/// Minimum raw best-chunk similarity for a document to be considered
-/// semantically relevant at all. Starting point from measured data:
-/// on-topic 0.29–0.45, pure noise ≤0.04. Sweep with `chops-search eval
-/// --min-cos` before treating this as settled.
-pub const MIN_COS: f32 = 0.20;
-
 /// Minimum raw best-chunk similarity for a document to count as
 /// semantically relevant. Calibrated at the model's native 256 dims,
 /// where on-topic queries score 0.29–0.45 and pure noise stays under
@@ -52,7 +46,7 @@ pub const MIN_COS: f32 = 0.20;
 /// unrelated vectors to be far apart, so noise cosines rise. Scaling by
 /// √(256/dim) keeps the floor at the same distance from the noise floor
 /// instead of leaving it behind — at 128 dims that is 0.28.
-pub const MIN_COS_AT_256: f32 = 0.20;
+pub const MIN_COS: f32 = 0.20;
 
 /// Coefficient on the √(2 ln n) chunk-count correction. Sweep with
 /// `chops-search eval --chunk-penalty`; 0.0 disables the correction entirely.
@@ -103,7 +97,7 @@ pub fn chunk_correction(n: usize, coeff: f32) -> f32 {
 }
 
 pub fn min_cos_for(dim: usize) -> f32 {
-    MIN_COS_AT_256 * (256.0 / dim.max(1) as f32).sqrt()
+    MIN_COS * (256.0 / dim.max(1) as f32).sqrt()
 }
 
 /// Rank documents by their best-scoring chunk, descending.

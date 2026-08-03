@@ -5,6 +5,7 @@
 use chops_search_core::builder::{embed_f32, quantize_global, quantize_rows};
 use chops_search_core::engine::Engine;
 use chops_search_core::format::{Doc, Index, ModelMeta};
+use chops_search_core::score::ScoreOpts;
 use chops_search_core::wordpiece::Vocab;
 
 const DIM: usize = 4;
@@ -87,6 +88,11 @@ fn build_artifacts() -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) {
 fn plan_ingest_search_hybrid() {
     let (meta, index, rows_file, prefix_file) = build_artifacts();
     let mut e = Engine::new(&meta, &index).unwrap();
+    // This test is about the byte path, not about relevance. The
+    // synthetic corpus has arbitrary cosines, so leave the floor out of
+    // it rather than tuning fixture vectors to clear a threshold that
+    // exists for real content.
+    e.set_score_opts(ScoreOpts::raw());
     e.ingest(0, &prefix_file).unwrap();
 
     // "flood" (row 2) is outside the prefix → plan demands a fetch.
