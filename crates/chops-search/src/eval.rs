@@ -54,7 +54,11 @@ pub fn eval(
     let rows_bytes = fs::read(&a.rows).with_context(|| format!("{}", a.rows.display()))?;
 
     let mut engine = Engine::new(&meta_bytes, &index_bytes).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let mut opts = chops_search_core::score::ScoreOpts::default();
+    // Start from what the engine derived, not from Default: min_cos
+    // scales with dimensionality, and Default has no idea what dim this
+    // index uses. Starting from Default would silently reset the floor to
+    // its 256-dim value on any run that passes only --chunk-penalty.
+    let mut opts = engine.score_opts();
     if let Some(v) = min_cos {
         opts.min_cos = v;
     }

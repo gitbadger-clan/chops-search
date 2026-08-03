@@ -43,6 +43,17 @@
 /// --min-cos` before treating this as settled.
 pub const MIN_COS: f32 = 0.20;
 
+/// Minimum raw best-chunk similarity for a document to count as
+/// semantically relevant. Calibrated at the model's native 256 dims,
+/// where on-topic queries score 0.29–0.45 and pure noise stays under
+/// 0.04.
+///
+/// PCA changes the geometry: fewer dimensions means less room for two
+/// unrelated vectors to be far apart, so noise cosines rise. Scaling by
+/// √(256/dim) keeps the floor at the same distance from the noise floor
+/// instead of leaving it behind — at 128 dims that is 0.28.
+pub const MIN_COS_AT_256: f32 = 0.20;
+
 /// Coefficient on the √(2 ln n) chunk-count correction. Sweep with
 /// `chops-search eval --chunk-penalty`; 0.0 disables the correction entirely.
 pub const CHUNK_PENALTY: f32 = 0.02;
@@ -89,6 +100,10 @@ pub fn chunk_correction(n: usize, coeff: f32) -> f32 {
         return 0.0;
     }
     coeff * (2.0 * (n as f32).ln()).sqrt()
+}
+
+pub fn min_cos_for(dim: usize) -> f32 {
+    MIN_COS_AT_256 * (256.0 / dim.max(1) as f32).sqrt()
 }
 
 /// Rank documents by their best-scoring chunk, descending.

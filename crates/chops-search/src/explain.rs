@@ -60,6 +60,12 @@ pub fn explain(artifacts: &Path, query: &str, limit: usize) -> Result<()> {
         dim
     );
 
+    println!(
+        "scoring:   min_cos {:.2} (derived from dim {dim}), chunk_penalty {:.3}",
+        score::min_cos_for(dim),
+        score::CHUNK_PENALTY
+    );
+
     // ---- Tokenization report (both pipelines) --------------------------
     let norm = Vocab::normalize(query);
     let words: Vec<&str> = keyword_words(&norm).into_iter().collect();
@@ -133,7 +139,13 @@ pub fn explain(artifacts: &Path, query: &str, limit: usize) -> Result<()> {
                 index.global_scale,
                 &index.chunk_doc,
                 index.docs.len(),
-                score::ScoreOpts::default(),
+                // Must match what Engine derives, or `query` reports a
+                // different set of documents passing the floor than
+                // `eval` and the browser actually use.
+                score::ScoreOpts {
+                    min_cos: score::min_cos_for(dim),
+                    ..Default::default()
+                },
             )
         }
     };

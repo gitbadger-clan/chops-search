@@ -71,7 +71,13 @@ impl Engine {
             used_semantic: false,
             best_chunk: vec![u32::MAX; n_docs],
             doc_first_chunk,
-            opts: crate::score::ScoreOpts::default(),
+            // The floor scales with dimensionality, so it cannot be a
+            // plain default: PCA raises noise cosines, and a value
+            // calibrated at 256 dims is too permissive at 128.
+            opts: crate::score::ScoreOpts {
+                min_cos: crate::score::min_cos_for(dim),
+                ..Default::default()
+            },
         })
     }
 
@@ -113,6 +119,12 @@ impl Engine {
     /// (the prefix file is byte_start 0).
     pub fn ingest(&mut self, byte_start: u32, bytes: &[u8]) -> Result<(), StoreError> {
         self.store.ingest(byte_start as usize, bytes)
+    }
+    /// The scoring thresholds currently in effect. `min_cos` is derived
+    /// from the index's dimensionality at construction, so this is the
+    /// right base for a caller that wants to override one field.
+    pub fn score_opts(&self) -> crate::score::ScoreOpts {
+        self.opts
     }
 
     /// Override scoring thresholds (eval sweeps these; the browser uses
