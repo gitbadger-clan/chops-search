@@ -155,12 +155,15 @@ fn assets(check: bool) -> Result<()> {
         total / 1024
     );
 
+    // Written last: a stamp that outlives a failed copy would claim the
+    // assets are current when they are half-updated.
+    fs::write(dest.join(".stamp"), format!("{}\n", input_hash(&root)?))?;
+
     // The wasm blob dominates, and it only grows by accident — a
     // dependency pulled into chops-search-core reaches the browser. Warn
     // rather than fail: the right response is usually to look at what
     // changed, not to block the build.
     let wasm = fs::metadata(dest.join("chops_search_wasm_bg.wasm"))?.len();
-    fs::write(dest.join(".stamp"), format!("{}\n", input_hash(&root)?))?;
     if wasm > 300 * 1024 {
         eprintln!(
             "warning: wasm blob is {} KB (>300 KB) — check what entered \
