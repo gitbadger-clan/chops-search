@@ -1,6 +1,7 @@
 [package]
 name = "chops-search"
 description = "Build tool for chops-search: turns a Zola content tree and a model2vec model into static search artifacts."
+readme = "../../README.md"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
