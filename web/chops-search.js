@@ -245,12 +245,18 @@ function wireInput() {
   });
 
   input.addEventListener('keydown', (ev) => {
-    // Ctrl+[ is Escape in a terminal (they emit the same byte, 0x1B) and
-    // vim users reach for it reflexively. The browser does not conflate
-    // them, so map it here rather than in the switch below.
-    const isEscape = ev.key === 'Escape' || (ev.ctrlKey && ev.key === '[');
+    // Terminal and readline bindings, which are muscle memory for anyone
+    // who lives in a shell: Ctrl+[ is Escape (same byte, 0x1B), Ctrl+N
+    // and Ctrl+P walk a list. The browser does not conflate any of them
+    // with their arrow-key equivalents, so map them here.
+    let key = ev.key;
+    if (ev.ctrlKey) {
+      if (key === '[') key = 'Escape';
+      else if (key === 'n' || key === 'N') key = 'ArrowDown';
+      else if (key === 'p' || key === 'P') key = 'ArrowUp';
+    }
 
-    switch (isEscape ? 'Escape' : ev.key) {
+    switch (key) {
       case 'Enter':
         if (selected >= 0 && rows[selected]) {
           ev.preventDefault();
