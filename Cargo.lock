@@ -186,7 +186,7 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
 name = "chops-search"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "anyhow",
  "chops-search-core",
@@ -206,7 +206,7 @@ dependencies = [
 
 [[package]]
 name = "chops-search-core"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "unicode-normalization",
 ]
@@ -1805,6 +1805,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "toml_edit"
+version = "0.25.13+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6975367e4d2ef766d86af01ffad14b622fecc8d4357a998fbc4deb6e9bacaf9b"
+dependencies = [
+ "indexmap",
+ "toml_datetime",
+ "toml_parser",
+ "toml_writer",
+ "winnow",
+]
+
+[[package]]
 name = "toml_parser"
 version = "1.1.3+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2259,6 +2272,9 @@ name = "winnow"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
+dependencies = [
+ "memchr",
+]
 
 [[package]]
 name = "wit-bindgen"
@@ -2277,6 +2293,7 @@ name = "xtask"
 version = "0.2.4"
 dependencies = [
  "sha2",
+ "toml_edit",
 ]
 
 [[package]]

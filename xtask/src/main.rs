@@ -1,23 +1,10 @@
-//! Repo automation. `cargo xtask <task>`.
+//! Repo automation. `cargo xtask <task>`, or `cargo xtask help`.
 //!
-//! The one job that matters: regenerate
-//! `crates/chops-search/assets/`, the files the CLI embeds with
-//! `include_bytes!` and writes into a site's `out` directory.
-//!
-//! Committed build output is normally a smell, so it earns its place by
-//! being mechanically verifiable — `cargo xtask assets --check` fails if
-//! the committed bytes differ from a fresh build, and CI runs it. The
-//! alternative (making users install wasm-pack and copy JS by hand) is
-//! four steps and two toolchains before anything works, which is the
-//! difference between a tool people try and one they don't.
-//!
-//! It also closes the drift hazard for good: the binary that writes the
-//! artifacts carries the runtime that reads them, so a format change
-//! can't ship a mismatched pair.
-//!
-//! Tasks:
-//!   assets [--check]   build wasm + copy web/ → crates/chops-search/assets/
-//!   dist               assets, then a release CLI build
+//! Deliberately dependency-light and hand-rolled rather than clap: xtask
+//! is compiled on every `cargo xtask` invocation, including in CI, and a
+//! derive-macro dependency there costs more than the argument parsing is
+//! worth. The tradeoff is writing the help by hand, which is what HELP
+//! below is.
 //!
 //! Set up with `.cargo/config.toml`:
 //!
@@ -30,8 +17,61 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+mod version;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+const HELP: &str = "\
+cargo xtask <task>
+
+TASKS
+  assets [--check]        Rebuild the embedded browser runtime.
+
+                          Builds crates/chops-search-wasm and copies the
+                          wasm pair plus web/*.js and web/*.css into
+                          crates/chops-search/assets/, where the CLI
+                          embeds them with include_bytes!. Run this after
+                          ANY change to chops-search-core or web/, or the
+                          published binary ships an engine that disagrees
+                          with the artifacts it writes.
+
+                          --check compares a stamp of the input files
+                          against the committed one and needs no wasm
+                          toolchain. That is what CI runs; comparing wasm
+                          bytes across machines never worked, because
+                          panic metadata carries absolute paths.
+
+  version [BUMP]          Bump the workspace version, or verify it.
+
+                          BUMP is major, minor, patch, or an explicit
+                          X.Y.Z that must move forward. Updates
+                          [workspace.package] version AND the version
+                          field of every internal dependency, which is
+                          the pair that has to move together: missing the
+                          second is invisible locally and fatal in CI.
+
+                          With no argument, checks they agree and changes
+                          nothing. Run it in CI.
+
+  demo <args…>            Run the CLI against examples/demo-site.
+
+                          Passes --site so the demo works from anywhere
+                          in the repo:
+                            cargo xtask demo build
+                            cargo xtask demo eval
+                            cargo xtask demo query \"some query\"
+
+  dist                    assets, then a release build of the CLI.
+
+  help                    This text.
+
+RELEASE
+  cargo xtask version minor
+  # edit CHANGELOG.md
+  cargo check --workspace          # refreshes Cargo.lock
+  git commit -am 'release X.Y.Z' && git tag vX.Y.Z
+  git push && git push --tags      # release.yml takes over
+";
 
 /// Sources copied verbatim from web/. The wasm pair is generated and
 /// handled separately.
@@ -48,12 +88,27 @@ fn main() {
     // silently emptied `demo`'s arguments.
     let rest: Vec<String> = args.collect();
 
+    // A bare `cargo xtask` should teach rather than scold, so it prints
+    // help and exits 0. An UNKNOWN task is a mistake, so that exits 2.
+    if task.is_empty() || task == "help" || task == "--help" || task == "-h" {
+        print!("{HELP}");
+        return;
+    }
+
     let result = match task.as_str() {
         "assets" => assets(rest.iter().any(|a| a == "--check")),
         "dist" => assets(false).and_then(|_| dist()),
         "demo" => demo(&rest),
-        _ => {
-            eprintln!("usage: cargo xtask <assets [--check] | dist | demo <args…>>");
+        // `--check` and no-argument both mean verify. The flag matches
+        // `assets --check` and reads better in CI; the bare form is what
+        // you type when you just want to know the current version.
+        "version" => {
+            let bump = rest.first().map(String::as_str).filter(|a| *a != "--check");
+            version::version(&root(), bump)
+        }
+        other => {
+            eprintln!("unknown task `{other}`\n");
+            eprint!("{HELP}");
             std::process::exit(2);
         }
     };
@@ -191,8 +246,8 @@ fn rel(root: &Path, p: &Path) -> String {
 }
 
 /// Run the CLI against examples/demo-site from anywhere in the repo.
-/// `cargo xtask demo eval`, `cargo xtask demo build`, `cargo xtask demo
-/// docs -- ...` — the site path is the only thing this adds.
+/// `cargo xtask demo eval`, `cargo xtask demo build`, and so on — the
+/// site path is the only thing this adds.
 fn demo(rest: &[String]) -> Result<()> {
     let root = root();
     let status = Command::new(env!("CARGO"))
@@ -235,6 +290,7 @@ fn collect(
     }
     Ok(())
 }
+
 /// Files whose contents determine the embedded runtime. A change to any
 /// of them means `cargo xtask assets` must be re-run.
 fn input_hash(root: &Path) -> Result<String> {

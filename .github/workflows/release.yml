@@ -45,6 +45,9 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
 
+      - name: Versions are consistent
+        run: cargo xtask version --check
+
       - name: Read workspace version
         id: version
         run: |
