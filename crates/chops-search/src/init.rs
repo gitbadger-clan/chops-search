@@ -45,6 +45,12 @@ dims = 128
 
 const SEARCH_PAGE: &str = r#"+++
 title = "Search"
+# Zola silently drops pages with no sort key from a sorted section, so a
+# search page without one renders nowhere and 404s. Both keys are here
+# because a section may sort by either, and neither value is meaningful
+# for a page that is not content.
+date = 1970-01-01
+weight = 999
 # The search page has nothing to find; indexing it makes it a result for
 # every query typed into it.
 in_search_index = false
@@ -60,7 +66,7 @@ in_search_index = false
 </div>
 
 <link rel="stylesheet" href="/search/chops-search.css">
-<script src="/search/chops-search.js"></script>
+<script defer src="/search/chops-search.js"></script>
 "#;
 
 const GITIGNORE_LINES: &[(&str, &str)] = &[
