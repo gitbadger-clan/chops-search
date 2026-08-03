@@ -16,10 +16,16 @@ On the demo corpus (9 posts, 24 labelled queries):
 | exact (`chromedp iframes`) | 100% | 100% |
 | paraphrase (`how long will this project take`) | 82% | 100% |
 | navigational (`about`) | 100% | 100% |
-| **overall** | **88%** | **100%** |
+| negative (`sourdough starter hydration`) | 100% | 100% |
+| **overall** | **92%** | **100%** |
 
 Paraphrase is the row that matters. Those queries share no words with the
-documents that answer them, so a keyword engine scores 0% there.
+documents that answer them, so a keyword engine scores 0% there. The
+negative row matters nearly as much: a query about nothing in the corpus
+returns nothing, rather than a confident-looking ranking of noise. The
+relevance floor that makes that possible scales with dimensionality, since
+PCA raises the cosines of unrelated vectors; at the default `dims = 128`
+it sits at 0.28.
 
 Based on Bart de Goede's *Client-side semantic search for your static
 site*, restructured around lazy row loading (Pagefind-style) instead of
@@ -52,20 +58,40 @@ skipped.
 
 `build` writes `chops-search.js`, which mounts its own dialog on any page
 that doesn't already contain a search box. Two lines in your base template
-(tabi: `templates/tabi/extend_head.html`) give you site-wide search opened
-with `Ctrl/Cmd-K` or `/`:
+(tabi: `templates/tabi/extend_head.html`) give you site-wide search:
 
 ```html
 <link rel="stylesheet" href="{{ get_url(path='search/chops-search.css') }}">
 <script defer src="{{ get_url(path='search/chops-search.js') }}"></script>
 ```
 
-Any element with `data-chops-open` opens it on click. Worth wiring to your
-header's search icon, since a keyboard-only entry point stays invisible to
-most visitors.
+Any element with `data-chops-open` opens it on click, Enter, or Space.
+Worth wiring to your header's search icon, since a keyboard-only entry
+point stays invisible to most visitors.
 
 Also set `build_search_index = false` in `config.toml`. Zola's elasticlunr
 index is dead weight alongside this one.
+
+### Keyboard
+
+| Key | Action |
+|---|---|
+| `Ctrl/Cmd-K` or `/` | Open the search dialog |
+| `↓` `↑` or `Ctrl-N` `Ctrl-P` | Move through results |
+| `Enter` | Open the selected result |
+| `Esc` or `Ctrl-[` | Clear the query; close the dialog if already empty |
+
+`/` only opens search when you are not already typing in a field, so it
+stays usable as a character everywhere else.
+
+Escape clears before it closes, deliberately: one keystroke that both
+wiped a long query and dismissed the dialog would be a keystroke too
+destructive. Press it twice to do both.
+
+`Ctrl-N`, `Ctrl-P`, and `Ctrl-[` are the terminal and readline bindings,
+for whom they are muscle memory. Some browsers reserve `Ctrl-N` at a level
+a page cannot intercept, so it may not fire everywhere; the arrow keys
+always work.
 
 ### What gets indexed
 
@@ -97,6 +123,33 @@ prefix_rows  = 2048
 title_weight = 2      # a title mention counts like N body mentions
 tag_weight   = 4
 ```
+
+### Driving your theme's own search modal
+
+If your theme already has a search dialog you would rather keep, give its
+input `id="chops-input"`, its result list `id="chops-results"` (it must be
+a `<ul>`; the script appends `<li>`), and add a `<span id="chops-mode">`
+for the status line. chops-search then runs in inline mode and drives that
+markup instead of building its own dialog.
+
+Three things become your responsibility in that mode, because they were
+the theme's script's job and chops-search does not touch DOM it did not
+create:
+
+- **Showing and hiding.** chops-search has no opinion about a container it
+  did not build.
+- **Clearing.** Add `data-chops-clear` to a button and it will be wired
+  up; the script fills an empty one with a ✕ icon. Clearing the input
+  programmatically needs `input.dispatchEvent(new Event('input'))`, since
+  setting `.value` fires nothing.
+- **Stacking context.** If the modal markup sits inside a container with
+  `transform`, `filter`, or its own `z-index`, no `z-index` on the modal
+  can lift it above the page. The self-mounted overlay avoids this by
+  being a direct child of `<body>`.
+
+Restyling the built-in overlay is usually less work. It is unopinionated
+by design: every colour derives from `currentColor`, and the custom
+properties on `.chops` are the theming surface.
 
 ## Hugo, Astro, Next.js, and everything else
 
@@ -152,6 +205,11 @@ Filenames carry a build hash so everything can be served `immutable`. The
 eager payload is around 800 KB at `dims = 128`. Everything else arrives a
 kilobyte at a time, only when a query needs it.
 
+<!-- VERIFY BEFORE RELEASE: the 800 KB figure is extrapolated from 256-dim
+     measurements, not measured. Sum model.prefix, model.meta.gz,
+     index.gz, and pkg/*.wasm in examples/demo-site/static/search after a
+     build, and use the real number. -->
+
 The wasm is content-independent by design. tinysearch and ternlight embed
 the index in the binary, which means recompiling on every content change.
 Here a content rebuild touches `index.bin` and `snippets.bin`, the model
@@ -204,6 +262,21 @@ shape. Even eight cases catch a chunking regression.
 
 `--fail-under` in CI turns ranking regressions into red builds.
 
+## Shell completion
+
+```fish
+# fish
+echo 'COMPLETE=fish chops-search | source' >> ~/.config/fish/config.fish
+# zsh
+echo 'source <(COMPLETE=zsh chops-search)' >> ~/.zshrc
+# bash
+echo 'source <(COMPLETE=bash chops-search)' >> ~/.bashrc
+```
+
+Candidates are computed when you press Tab rather than frozen into a
+script, so `--kind` lists the kinds your query set actually uses. For a
+conventional static script instead, `chops-search completions <shell>`.
+
 ## What the tests pin down
 
 - **Tokenizer parity, per codepoint.** `tokenizer_parity.rs` sweeps around
@@ -230,9 +303,12 @@ shape. Even eight cases catch a chunking regression.
 - **Artifacts are byte-stable** given the same content and model: sorted
   walks, sorted postings, tie-broken permutations, deterministic
   best-chunk selection.
-- **The embedded runtime matches its source.** `cargo xtask assets
-  --check` rebuilds the wasm and diffs it against what's committed, so the
-  binary that writes artifacts always carries the runtime that reads them.
+- **The embedded runtime was regenerated after its sources changed.**
+  `cargo xtask assets --check` hashes the wasm crate's sources, the
+  browser sources, and the lockfile, and compares that against a committed
+  stamp. It does not rebuild and diff the wasm: that never worked across
+  machines, because panic metadata embeds absolute paths and wasm-opt
+  versions differ. The weaker claim is the one that can actually hold.
 
 Both parity oracles need model files:
 
