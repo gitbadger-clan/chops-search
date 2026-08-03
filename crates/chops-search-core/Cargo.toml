@@ -1,6 +1,7 @@
 [package]
 name = "chops-search-core"
 description = "Hybrid keyword + semantic search engine for static sites: WordPiece, int8 row store, BM25, RRF. Compiles to native and wasm unchanged."
+readme = "../../README.md"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
