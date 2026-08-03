@@ -19,7 +19,7 @@ name = "chops-search"
 path = "src/main.rs"
 
 [dependencies]
-chops-search-core = { path = "../chops-search-core", version = "0.2.1" }
+chops-search-core = { path = "../chops-search-core", version = "0.2.3" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 clap_complete = { version = "4.6.8", features = ["unstable-dynamic"] }
