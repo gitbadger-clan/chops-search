@@ -1,17 +1,14 @@
 /* chops-search — default styles.
  *
  * Plain CSS on purpose. Zola compiles Sass from `sass/`, but
- * `chops-search build` writes into `static/`, which Zola copies verbatim
- * — a .scss shipped here would never be compiled. Custom properties are
- * the theming interface instead, so a site can restyle this without a
- * preprocessor and without overriding selectors.
+ * `chops-search build` writes into `static/`, which Zola copies verbatim,
+ * so a .scss shipped here would never be compiled. Custom properties are
+ * the theming interface instead.
  *
  * Deliberately unopinionated: no colours of its own, no fonts. Everything
  * derives from `currentColor` and the surrounding text, so it inherits a
  * light or dark theme with no media query and no second ruleset. The one
- * exception is the overlay's panel background, which has to be opaque —
- * `--chops-panel-bg` is the variable to set if `Canvas` doesn't match
- * your page.
+ * exception is the overlay panel's background, which has to be opaque.
  *
  *   .chops {
  *     --chops-accent: var(--my-link-color);
@@ -24,26 +21,86 @@
   --chops-muted: 0.7;
   --chops-gap: 0.75rem;
   --chops-radius: 6px;
+  /* The panel wants a softer corner than the elements inside it: a large
+     surface with the same radius as a 2rem-tall input reads as sharp. */
+  --chops-panel-radius: 1rem;
   --chops-mark: 18%;
   --chops-hover: 8%;
   --chops-panel-bg: Canvas;
 }
 
-/* ---- input ---------------------------------------------------------- */
+/* ---- search bar ----------------------------------------------------- */
 
-.chops input[type='search'] {
-  width: 100%;
-  padding: 0.6rem 0.8rem;
+/* The bar carries the border, not the input. Bordering the input would
+ * put the icon and clear button outside the visual field they belong to. */
+.chops-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.15rem 0.5rem;
+  border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+  border-radius: calc(var(--chops-radius) * 2);
+}
+
+.chops-bar:focus-within {
+  border-color: var(--chops-accent);
+  outline: 1px solid var(--chops-accent);
+}
+
+.chops-bar input[type='search'] {
+  flex: 1;
+  min-width: 0;
+  padding: 0.5rem 0;
   font: inherit;
   color: inherit;
   background: transparent;
-  border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
-  border-radius: var(--chops-radius);
+  border: 0;
+  outline: none;
+  /* WebKit adds its own ✕ inside type=search, which would sit beside
+   * ours and clear without telling the script. */
+  appearance: none;
 }
 
-.chops input[type='search']:focus-visible {
-  outline: 2px solid var(--chops-accent);
-  outline-offset: 1px;
+.chops-bar input[type='search']::-webkit-search-cancel-button {
+  display: none;
+}
+
+.chops-icon,
+.chops-clear {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 1.25rem;
+  height: 1.25rem;
+  color: inherit;
+}
+
+.chops-icon {
+  opacity: var(--chops-muted);
+  pointer-events: none;
+}
+
+.chops-icon svg,
+.chops-clear svg {
+  width: 100%;
+  height: 100%;
+}
+
+.chops-clear {
+  padding: 0;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  opacity: var(--chops-muted);
+}
+
+.chops-clear:hover,
+.chops-clear:focus-visible {
+  opacity: 1;
+}
+
+.chops-clear[hidden] {
+  display: none;
 }
 
 /* ---- status line ---------------------------------------------------- */
@@ -122,7 +179,7 @@
 /* ---- overlay -------------------------------------------------------- */
 
 /* Used when a page has no #chops-input and the script mounts its own
- * dialog. `hidden` does the showing and hiding, so there's no state to
+ * dialog. `hidden` does the showing and hiding, so there is no state to
  * keep in a class. */
 .chops-overlay[hidden] {
   display: none;
@@ -152,6 +209,7 @@
   background: var(--chops-panel-bg);
   border: 1px solid color-mix(in srgb, currentColor 15%, transparent);
   box-shadow: 0 1rem 3rem color-mix(in srgb, black 25%, transparent);
+  border-radius: var(--chops-panel-radius);
 }
 
 /* Stops the page scrolling behind an open dialog. */
@@ -187,6 +245,9 @@
  *   .chops-overlay               the dialog backdrop, when self-mounted
  *   .chops-panel                 the dialog itself
  *   .chops-open                  set on <html> while the dialog is open
+ *   .chops-bar                   the search field row
+ *   .chops-icon                  the magnifier
+ *   .chops-clear                 clear when there is text, close when empty
  *   #chops-input                 the search input (role=combobox)
  *   #chops-mode / .chops-mode    status line (aria-live)
  *   #chops-results               result list (role=listbox)
@@ -194,5 +255,6 @@
  *   .chops-snippet               matched text under a result
  *   .chops-snippet mark          highlighted query terms
  *
- * Any element with [data-chops-open] opens the overlay on click.
+ * [data-chops-open]  opens the overlay on click, Enter, or Space.
+ * [data-chops-clear] in INLINE mode, wires a host-supplied clear button.
  */

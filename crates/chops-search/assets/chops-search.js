@@ -1,7 +1,7 @@
 // Page-side glue for chops-search. Two modes, chosen automatically:
 //
-// INLINE — the page already has #chops-input (a dedicated /search/ page).
-// Used as-is.
+// INLINE — the page already has #chops-input (a dedicated /search/ page,
+// or a theme's own modal). Used as-is; the host owns the markup.
 //
 // OVERLAY — no #chops-input on the page. The script builds its own dialog
 // and opens it on Ctrl/Cmd-K, `/`, or a click on any [data-chops-open]
@@ -16,9 +16,9 @@
 // than on load.
 //
 // Keyboard: ArrowUp/Down move the selection, Enter follows it, Escape
-// closes and restores focus to whatever had it before. That's the ARIA
-// combobox pattern; without it the overlay is a mouse-only feature, which
-// for a keyboard-opened dialog is an odd thing to be.
+// clears and then closes. That's the ARIA combobox pattern; without it
+// the overlay is a mouse-only feature, which for a keyboard-opened dialog
+// is an odd thing to be.
 
 let worker = null;
 let ready = false;
@@ -32,6 +32,7 @@ let selected = -1;
 let input = null;
 let resultsEl = null;
 let modeEl = null;
+let clearEl = null;
 let overlay = null;      // null in inline mode
 let lastFocused = null;
 
@@ -39,6 +40,17 @@ const DEBOUNCE_MS = 120;
 const SNIPPET_CHARS = 200;
 const SNIPPET_LEAD = 50;
 const BASE = '/search';
+
+const ICON_SEARCH =
+  '<svg viewBox="0 -960 960 960" aria-hidden="true"><path fill="currentColor" ' +
+  'd="M784-120 532-372q-30 24-69 38t-83 14q-109 0-184.5-75.5T120-580q0-109 ' +
+  '75.5-184.5T380-840q109 0 184.5 75.5T640-580q0 44-14 83t-38 69l252 252-56 ' +
+  '56ZM380-400q75 0 127.5-52.5T560-580q0-75-52.5-127.5T380-760q-75 0-127.5 ' +
+  '52.5T200-580q0 75 52.5 127.5T380-400Z"/></svg>';
+const ICON_CLOSE =
+  '<svg viewBox="0 -960 960 960" aria-hidden="true"><path fill="currentColor" ' +
+  'd="m256-200-56-56 224-224-224-224 56-56 224 224 224-224 56 56-224 224 224 ' +
+  '224-56 56-224-224-224 224Z"/></svg>';
 
 // ---- mode detection -------------------------------------------------
 
@@ -53,6 +65,11 @@ function bindInline(el) {
   input = el;
   resultsEl = document.querySelector('#chops-results');
   modeEl = document.querySelector('#chops-mode');
+  // Optional in inline mode: the host may or may not have provided one.
+  // If it's empty, fill it, so a scaffolded page matches the overlay.
+  clearEl = document.querySelector('[data-chops-clear]');
+  if (clearEl && !clearEl.childElementCount) clearEl.innerHTML = ICON_CLOSE;
+  wireClear();
   wireInput();
   input.addEventListener('focus', boot, { once: true });
 }
@@ -67,9 +84,16 @@ function bindOverlayTriggers() {
     }
   });
   document.querySelectorAll('[data-chops-open]').forEach((el) => {
-    el.addEventListener('click', (ev) => {
+    const open = (ev) => {
       ev.preventDefault();
       openOverlay();
+    };
+    el.addEventListener('click', open);
+    // Themes often use <div role="button">, which gets no free keyboard
+    // activation. Enter and Space are what the role promises, and tabi's
+    // search trigger is exactly this shape.
+    el.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter' || ev.key === ' ') open(ev);
     });
   });
 }
@@ -94,6 +118,16 @@ function buildOverlay() {
   const panel = document.createElement('div');
   panel.className = 'chops chops-panel';
 
+  // The bar carries the border and the icons; the input inside it is
+  // bare. Styling the input directly would leave the icons outside the
+  // visual field they belong to.
+  const bar = document.createElement('div');
+  bar.className = 'chops-bar';
+
+  const icon = document.createElement('span');
+  icon.className = 'chops-icon';
+  icon.innerHTML = ICON_SEARCH;
+
   input = document.createElement('input');
   input.type = 'search';
   input.id = 'chops-input';
@@ -105,6 +139,14 @@ function buildOverlay() {
   input.setAttribute('aria-controls', 'chops-results');
   input.setAttribute('aria-autocomplete', 'list');
 
+  clearEl = document.createElement('button');
+  clearEl.type = 'button';
+  clearEl.className = 'chops-clear';
+  clearEl.setAttribute('data-chops-clear', '');
+  clearEl.innerHTML = ICON_CLOSE;
+
+  bar.append(icon, input, clearEl);
+
   modeEl = document.createElement('span');
   modeEl.id = 'chops-mode';
   modeEl.className = 'chops-mode';
@@ -115,7 +157,7 @@ function buildOverlay() {
   resultsEl.className = 'chops-results';
   resultsEl.setAttribute('role', 'listbox');
 
-  panel.append(input, modeEl, resultsEl);
+  panel.append(bar, modeEl, resultsEl);
   overlay.append(panel);
   document.body.appendChild(overlay);
 
@@ -123,6 +165,7 @@ function buildOverlay() {
   overlay.addEventListener('click', (ev) => {
     if (ev.target === overlay) closeOverlay();
   });
+  wireClear();
   wireInput();
 }
 
@@ -134,7 +177,6 @@ function openOverlay() {
   overlay.hidden = false;
   document.documentElement.classList.add('chops-open');
   input.focus();
-  input.select();
   boot();
 }
 
@@ -142,22 +184,73 @@ function closeOverlay() {
   if (!overlay || overlay.hidden) return;
   overlay.hidden = true;
   document.documentElement.classList.remove('chops-open');
-  render([], true, '');
+  reset();
   // Returning focus is the part people notice only when it's missing:
   // without it, Escape drops the caret at the top of the document.
   lastFocused?.focus?.();
+}
+
+/// Clear the query and everything derived from it. Called on close so a
+/// reopen starts fresh: keeping the text but dropping the results (the
+/// previous behaviour) was the worst of both, showing a query with
+/// nothing under it.
+function reset() {
+  if (input) input.value = '';
+  gen += 1; // orphan any in-flight query
+  render([], true, '');
+  syncClear();
+}
+
+// ---- clear / close button -------------------------------------------
+
+function wireClear() {
+  if (!clearEl) return;
+  clearEl.addEventListener('click', (ev) => {
+    ev.preventDefault();
+    clearOrClose();
+  });
+  syncClear();
+}
+
+/// One button, two jobs. With text it clears; empty, in the overlay, it
+/// closes. That matches what the same ✕ does in most search fields and
+/// avoids a second control for an action Escape already covers.
+function clearOrClose() {
+  if (input.value) {
+    reset();
+    input.focus();
+  } else if (overlay) {
+    closeOverlay();
+  }
+}
+
+function syncClear() {
+  if (!clearEl) return;
+  const hasText = !!input.value;
+  const label = hasText ? 'Clear search' : 'Close search';
+  clearEl.setAttribute('aria-label', label);
+  clearEl.title = label;
+  // Inline mode has nothing to close, so an empty field means the button
+  // has no job. In the overlay it always does.
+  clearEl.hidden = !hasText && !overlay;
 }
 
 // ---- input + keyboard ------------------------------------------------
 
 function wireInput() {
   input.addEventListener('input', () => {
+    syncClear();
     clearTimeout(debounceTimer);
     debounceTimer = setTimeout(fire, DEBOUNCE_MS);
   });
 
   input.addEventListener('keydown', (ev) => {
-    switch (ev.key) {
+    // Ctrl+[ is Escape in a terminal (they emit the same byte, 0x1B) and
+    // vim users reach for it reflexively. The browser does not conflate
+    // them, so map it here rather than in the switch below.
+    const isEscape = ev.key === 'Escape' || (ev.ctrlKey && ev.key === '[');
+
+    switch (isEscape ? 'Escape' : ev.key) {
       case 'Enter':
         if (selected >= 0 && rows[selected]) {
           ev.preventDefault();
@@ -176,15 +269,21 @@ function wireInput() {
         move(-1);
         break;
       case 'Escape':
-        if (overlay) {
-          ev.preventDefault();
+        // Escape clears first, closes second. A single press that wiped a
+        // long query AND dismissed the dialog would be one keystroke too
+        // destructive. In inline mode there is nothing to close, so it
+        // only ever clears.
+        ev.preventDefault();
+        if (input.value) {
+          reset();
+        } else if (overlay) {
           closeOverlay();
         }
         break;
       case 'Tab':
-        // A modal dialog keeps focus inside it. With one focusable
-        // element that means holding focus on the input.
-        if (overlay) ev.preventDefault();
+        // A modal dialog keeps focus inside it. The clear button is the
+        // only other focusable element in the panel, so Tab cycles
+        // between the two rather than escaping to the page behind.
         break;
     }
   });
