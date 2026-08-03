@@ -102,7 +102,7 @@ fn assets(check: bool) -> Result<()> {
 
     // Build into a staging directory rather than straight into assets/,
     // so a failed or partial wasm-pack run can't leave the committed
-    // tree half-updated — and so --check has something to diff against.
+    // tree half-updated.
     println!("building wasm → {}", staging.display());
     let status = Command::new("wasm-pack")
         .current_dir(&root)
@@ -130,8 +130,6 @@ fn assets(check: bool) -> Result<()> {
     for name in WEB_FILES {
         planned.push((root.join("web").join(name), dest.join(name)));
     }
-
-    println!("building wasm → {}", staging.display());
 
     fs::create_dir_all(&dest)?;
     let mut total = 0usize;
