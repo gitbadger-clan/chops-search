@@ -1,0 +1,32 @@
+<svg viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="chops-search">
+  <defs>
+    <linearGradient id="sig" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#8B7CFF"/>
+      <stop offset="0.55" stop-color="#5AA7F5"/>
+      <stop offset="1" stop-color="#2AE6C8"/>
+    </linearGradient>
+    <clipPath id="lens"><circle cx="112" cy="112" r="50"/></clipPath>
+  </defs>
+
+  <!-- tile -->
+  <rect x="10" y="10" width="236" height="236" rx="58" fill="#131425"/>
+  <rect x="10" y="10" width="236" height="236" rx="58" fill="none" stroke="#2A2C4A" stroke-width="2"/>
+
+  <!-- rows of the model file, seen through the lens -->
+  <g clip-path="url(#lens)">
+    <rect x="52" y="74"  width="120" height="10" rx="5" fill="#3A3D5C"/>
+    <rect x="52" y="92"  width="120" height="10" rx="5" fill="#3A3D5C"/>
+    <rect x="52" y="128" width="120" height="10" rx="5" fill="#3A3D5C"/>
+    <rect x="52" y="146" width="120" height="10" rx="5" fill="#3A3D5C"/>
+  </g>
+
+  <!-- the fetched row: bright inside the lens, a detached range outside it -->
+  <rect x="66" y="106" width="92" height="13" rx="6.5" fill="url(#sig)"/>
+  <rect x="176" y="106" width="34" height="13" rx="6.5" fill="url(#sig)"/>
+
+  <!-- lens -->
+  <circle cx="112" cy="112" r="58" fill="none" stroke="url(#sig)" stroke-width="15"/>
+
+  <!-- handle, tapered to an edge: the chop -->
+  <path d="M150 162 L162 150 L212 192 L200 212 Z" fill="url(#sig)"/>
+</svg>

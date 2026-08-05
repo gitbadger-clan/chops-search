@@ -1,0 +1,29 @@
+<svg viewBox="0 0 900 200" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="chops-search">
+  <defs>
+    <linearGradient id="sigw" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#8B7CFF"/>
+      <stop offset="0.55" stop-color="#5AA7F5"/>
+      <stop offset="1" stop-color="#2AE6C8"/>
+    </linearGradient>
+    <linearGradient id="sigtext" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#5AA7F5"/>
+      <stop offset="1" stop-color="#2AE6C8"/>
+    </linearGradient>
+    <clipPath id="lensw"><circle cx="112" cy="112" r="50"/></clipPath>
+  </defs>
+  <g transform="translate(10,11) scale(0.7)">
+    <rect x="10" y="10" width="236" height="236" rx="58" fill="#131425"/>
+    <g clip-path="url(#lensw)">
+      <rect x="52" y="74"  width="120" height="10" rx="5" fill="#3A3D5C"/>
+      <rect x="52" y="92"  width="120" height="10" rx="5" fill="#3A3D5C"/>
+      <rect x="52" y="128" width="120" height="10" rx="5" fill="#3A3D5C"/>
+      <rect x="52" y="146" width="120" height="10" rx="5" fill="#3A3D5C"/>
+    </g>
+    <rect x="66" y="106" width="92" height="13" rx="6.5" fill="url(#sigw)"/>
+    <rect x="176" y="106" width="34" height="13" rx="6.5" fill="url(#sigw)"/>
+    <circle cx="112" cy="112" r="58" fill="none" stroke="url(#sigw)" stroke-width="15"/>
+    <path d="M150 162 L162 150 L212 192 L200 212 Z" fill="url(#sigw)"/>
+  </g>
+  <text x="212" y="130" font-family="Poppins, Futura, 'Century Gothic', 'Trebuchet MS', system-ui, sans-serif"
+        font-size="84" letter-spacing="-2"><tspan font-weight="700" fill="#ECEEF2">chops</tspan><tspan font-weight="400" fill="#888B96">-</tspan><tspan font-weight="400" fill="url(#sigtext)">search</tspan></text>
+</svg>

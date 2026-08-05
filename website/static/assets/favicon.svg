@@ -1,0 +1,19 @@
+<svg viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="chops-search">
+  <defs>
+    <linearGradient id="sigf" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#8B7CFF"/>
+      <stop offset="0.55" stop-color="#5AA7F5"/>
+      <stop offset="1" stop-color="#2AE6C8"/>
+    </linearGradient>
+    <clipPath id="lensf"><circle cx="110" cy="110" r="46"/></clipPath>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="48" fill="#131425"/>
+  <g clip-path="url(#lensf)">
+    <rect x="50" y="76"  width="120" height="13" rx="6.5" fill="#3A3D5C"/>
+    <rect x="50" y="141" width="120" height="13" rx="6.5" fill="#3A3D5C"/>
+  </g>
+  <rect x="62" y="102" width="90" height="17" rx="8.5" fill="url(#sigf)"/>
+  <rect x="172" y="102" width="38" height="17" rx="8.5" fill="url(#sigf)"/>
+  <circle cx="110" cy="110" r="56" fill="none" stroke="url(#sigf)" stroke-width="18"/>
+  <path d="M148 164 L164 148 L216 192 L200 216 Z" fill="url(#sigf)"/>
+</svg>
