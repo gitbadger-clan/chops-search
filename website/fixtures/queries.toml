@@ -41,6 +41,8 @@ kind = "exact"
 
 [[query]]
 q = "prefix_rows"
+# The artifacts page says both halves of the split token more often than
+# the configuration page, and it is a legitimate answer.
 expect = ["/reference/artifacts/", "/reference/configuration/", "/reference/cli/"]
 kind = "exact"
 
