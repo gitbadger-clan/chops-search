@@ -1,0 +1,55 @@
+{% import "macros/icons.html" as ic %}
+<!DOCTYPE html>
+<html lang="{{ lang | default(value=config.default_language) }}" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}{{ config.title }}{% endblock title %}</title>
+  <meta name="description" content="{% block description %}{{ config.description }}{% endblock description %}">
+  <link rel="icon" type="image/svg+xml" href="{{ get_url(path='assets/favicon.svg', trailing_slash=false) }}">
+  <link rel="apple-touch-icon" href="{{ get_url(path='assets/logo.svg', trailing_slash=false) }}">
+  <link rel="stylesheet" href="{{ get_url(path='main.css', trailing_slash=false) }}">
+  <script>
+    // Set the theme before first paint to avoid a flash.
+    (function () {
+      try {
+        var t = localStorage.getItem('theme');
+        if (!t) t = matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+        document.documentElement.dataset.theme = t;
+      } catch (e) {}
+    })();
+  </script>
+</head>
+<body>
+  <header class="site-header">
+    <button class="icon-btn menu-btn" aria-label="Toggle navigation" aria-expanded="false">{{ ic::icon(name="menu") }}</button>
+    <a class="site-title" href="{{ get_url(path='/') }}"><img class="site-logo" src="{{ get_url(path='assets/logo.svg', trailing_slash=false) }}" alt="">{{ config.title }}</a>
+
+    <div class="search">
+      <button class="search-box" type="button" data-chops-open>
+        {{ ic::icon(name="search") }}
+        <span class="search-hint">Search</span>
+        <kbd class="search-kbd">⌘K</kbd>
+      </button>
+    </div>
+
+    <div class="header-end">
+      {% if config.extra.github %}
+      <a class="icon-btn" href="{{ config.extra.github }}" aria-label="GitHub" rel="noopener">{{ ic::icon(name="github") }}</a>
+      {% endif %}
+      <button class="icon-btn theme-toggle" aria-label="Toggle color theme">
+        <span class="when-dark">{{ ic::icon(name="sun") }}</span>
+        <span class="when-light">{{ ic::icon(name="moon") }}</span>
+      </button>
+    </div>
+  </header>
+
+  <div class="scrim" hidden></div>
+
+  {% block body %}{% endblock body %}
+
+  <link rel="stylesheet" href="{{ get_url(path='search/chops-search.css', trailing_slash=false) }}">
+  <script defer src="{{ get_url(path='search/chops-search.js', trailing_slash=false) }}"></script>
+  <script src="{{ get_url(path='js/theme.js', trailing_slash=false) }}" defer></script>
+</body>
+</html>

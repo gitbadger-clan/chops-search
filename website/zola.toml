@@ -1,0 +1,44 @@
+base_url = "https://chops-search.gitbadger.com"
+title = "chops-search"
+description = "Hybrid keyword + semantic search for static sites, running entirely in the browser."
+default_language = "en"
+
+compile_sass = true
+build_search_index = false   # this site is searched by chops-search itself
+generate_feeds = false
+minify_html = false
+
+[markdown]
+smart_punctuation = false
+
+[markdown.highlighting]
+style = "inline"
+light_theme = "github-light"
+dark_theme = "github-dark"
+
+[extra]
+github = "https://github.com/gitbadger-clan/chops-search"
+
+[[extra.sidebar]]
+title = "Documentation"
+[[extra.sidebar.items]]
+title = "Tutorials"
+auto = "tutorials"
+[[extra.sidebar.items]]
+title = "How-To Guides"
+auto = "how-to"
+[[extra.sidebar.items]]
+title = "Explanations"
+auto = "explanations"
+[[extra.sidebar.items]]
+title = "Reference"
+auto = "reference"
+
+[[extra.sidebar]]
+title = "Overview"
+[[extra.sidebar.items]]
+title = "Welcome"
+url = "/"
+[[extra.sidebar.items]]
+title = "Search"
+url = "/search/"
