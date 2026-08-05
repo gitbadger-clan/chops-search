@@ -1,0 +1,21 @@
+# chops-search — https://github.com/gitbadger-clan/chops-search
+#
+# Paths resolve relative to THIS file, so `chops-search build` works from
+# anywhere inside the site.
+
+content = "content"
+out     = "static/search"
+model   = ".chops-search/model"
+
+# PCA target. The model's native size is 256; 128 halves the eager prefix
+# and every per-query range fetch. Re-run `chops-search eval` after
+# changing it — dimensionality reduction is real information loss.
+dims = 128
+
+# Term-frequency weights. Tags are the author's own statement of what a
+# page is about, so they outweigh the title, which outweighs body text.
+# title_weight = 2
+# tag_weight   = 4
+
+# chunk_chars = 600
+# prefix_rows = 2048
