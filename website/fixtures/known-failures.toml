@@ -1,0 +1,65 @@
+# Known-failing cases for the chops-search docs corpus. NOT part of the CI
+# gate. Each case reproduces an open engine issue or an aspirational
+# capability; run with:
+#
+#   chops-search eval --queries fixtures/known-failures.toml
+#
+# When a fix lands, verify its case passes at default scoring and move it
+# back into fixtures/queries.toml in the same PR. These cases are the
+# acceptance tests for the issues they cite; do not "fix" them by blessing
+# the current noise winners in `expect`.
+
+[[query]]
+q = "data-chops-open"
+# ISSUE: compound tokenization. Hyphenated identifiers split into parts;
+# "chops" is a corpus-wide stopword (df 19/19), so ranking is noise-driven.
+# Fix: index hyphen/underscore compounds as both parts AND whole token.
+expect = ["/how-to/site-wide-search/", "/reference/browser-runtime/"]
+kind = "exact"
+
+[[query]]
+q = "getting started"
+# ISSUE: title weight vs BM25 length normalisation. A short page that
+# mentions the phrase outranks the page titled with it. Candidate fix:
+# title_weight default, or tags on docs pages. Also flips with
+# title_weight = 4 (content-side change, not an engine fix).
+expect = ["/tutorials/getting-started/"]
+kind = "navigational"
+
+[[query]]
+q = "cli"
+# ISSUE: same title-weight/length-norm interaction as "getting started".
+expect = ["/reference/cli/"]
+kind = "navigational"
+
+[[query]]
+q = "a page i wrote never shows up"
+# ASPIRATIONAL: maximally colloquial symptom phrasing with almost no
+# content words. Docs-side fix available too: indexing-rules could open
+# with the symptom in the user's vocabulary.
+expect = ["/reference/indexing-rules/", "/tutorials/evaluate-your-search/"]
+kind = "paraphrase"
+
+[[query]]
+q = "stopped understanding meaning, only matches literal words now"
+# ASPIRATIONAL: symptom-language paraphrase for keyword-only degradation.
+# Docs-side fix available: designed-degradation could state the symptom
+# as a visitor experiences it.
+expect = ["/explanations/designed-degradation/", "/reference/browser-runtime/"]
+kind = "paraphrase"
+
+[[query]]
+q = "shrink vectors to save bandwidth"
+# ISSUE: fenced-code keyword pollution. reindex-in-ci wins on the term
+# frequency of "Save"/"save" inside its YAML step names. Fix: code_weight
+# (< 1) for fenced-block content, like title_weight but downward.
+expect = ["/how-to/manage-the-model/", "/reference/configuration/", "/explanations/range-fetched-model/"]
+kind = "paraphrase"
+
+[[query]]
+q = "toddler bedtime routine"
+# ISSUE(S): floor calibration (noise cosines clear the derived floor at
+# dims=128) and prefix-as-sole-evidence ("routine" prefix-matches
+# "routinely" in site-wide-search and surfaces a result on that alone).
+expect = []
+kind = "negative"
