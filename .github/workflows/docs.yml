@@ -33,9 +33,9 @@ jobs:
       - name: Build chops-search from this commit
         run: cargo install --path crates/chops-search --locked
 
-      - name: Cache Zola binary
+      - name: Restore Zola
         id: cache-zola
-        uses: actions/cache@v5
+        uses: actions/cache/restore@v5
         with:
           path: ~/.cargo/bin/zola
           key: zola-${{ runner.os }}-${{ env.ZOLA_REV }}
@@ -43,6 +43,13 @@ jobs:
       - name: Build Zola from source
         if: steps.cache-zola.outputs.cache-hit != 'true'
         run: cargo install --git https://github.com/getzola/zola.git --rev ${{ env.ZOLA_REV }} --locked
+
+      - name: Save Zola
+        if: always() && steps.cache-zola.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: ~/.cargo/bin/zola
+          key: zola-${{ runner.os }}-${{ env.ZOLA_REV }}
 
       - name: Restore model
         id: model
