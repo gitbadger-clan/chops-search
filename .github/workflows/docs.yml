@@ -5,6 +5,9 @@ on:
     paths: ["website/**", "crates/**", "Cargo.lock", ".github/workflows/docs.yml"]
   pull_request:
     paths: ["website/**", "crates/**", "Cargo.lock", ".github/workflows/docs.yml"]
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 env:
   ZOLA_REV: "85193b38c742df51151bf7dc9ab6504e91a4e6a1"   # same pin as unicow.dev
 jobs:
