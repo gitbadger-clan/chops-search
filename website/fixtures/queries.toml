@@ -1,0 +1,134 @@
+# Labelled queries over the chops-search docs corpus (19 docs).
+#
+# This corpus is meta: documentation about a search engine, indexed by that
+# search engine. Two consequences shape the fixture. First, topics deliberately
+# span a how-to and a reference page, so `expect` lists every page that
+# legitimately answers (any counts as a correct top-1). Second, the docs
+# QUOTE their own example queries: "sourdough starter hydration" appears
+# verbatim in two pages, so it can NOT be a negative control here. Negatives
+# below were checked word-by-word against the corpus.
+#
+# Regenerate the URL list with `chops-search docs` after adding pages.
+
+# ---------------------------------------------------------------- exact
+[[query]]
+q = "wasm-unsafe-eval"
+expect = ["/how-to/deploy-with-caching/", "/how-to/site-wide-search/"]
+kind = "exact"
+
+[[query]]
+q = "model lockfile"
+expect = ["/how-to/manage-the-model/", "/how-to/reindex-in-ci/", "/tutorials/getting-started/"]
+kind = "exact"
+
+[[query]]
+q = "reciprocal rank fusion"
+# Also appears inside queries-toml's example block; both are honest answers.
+expect = ["/explanations/hybrid-ranking/", "/reference/queries-toml/"]
+kind = "exact"
+
+[[query]]
+q = "tag_weight"
+expect = ["/reference/configuration/", "/explanations/hybrid-ranking/"]
+kind = "exact"
+
+[[query]]
+q = "data-chops-open"
+expect = ["/how-to/site-wide-search/", "/reference/browser-runtime/"]
+kind = "exact"
+
+[[query]]
+q = "Content-Range"
+expect = ["/explanations/designed-degradation/"]
+kind = "exact"
+
+[[query]]
+q = "prefix_rows"
+expect = ["/reference/artifacts/", "/reference/configuration/", "/reference/cli/"]
+kind = "exact"
+
+[[query]]
+q = "in_search_index"
+expect = ["/reference/indexing-rules/"]
+kind = "exact"
+
+# ----------------------------------------------------------- paraphrase
+[[query]]
+q = "works locally but broken after deploying"
+expect = ["/how-to/deploy-with-caching/", "/explanations/designed-degradation/"]
+kind = "paraphrase"
+
+[[query]]
+q = "make the dialog match my site's colors"
+expect = ["/reference/browser-runtime/", "/how-to/site-wide-search/", "/how-to/use-your-themes-search-ui/"]
+kind = "paraphrase"
+
+[[query]]
+q = "how much do visitors have to download"
+expect = ["/explanations/range-fetched-model/", "/how-to/deploy-with-caching/"]
+kind = "paraphrase"
+
+[[query]]
+q = "nonsense queries come back with junk results"
+expect = ["/explanations/hybrid-ranking/", "/reference/queries-toml/", "/tutorials/evaluate-your-search/"]
+kind = "paraphrase"
+
+[[query]]
+q = "rebuild automatically when i publish a post"
+expect = ["/how-to/reindex-in-ci/"]
+kind = "paraphrase"
+
+[[query]]
+q = "a page i wrote never shows up"
+expect = ["/reference/indexing-rules/", "/tutorials/evaluate-your-search/"]
+kind = "paraphrase"
+
+[[query]]
+q = "stopped understanding meaning, only matches literal words now"
+expect = ["/explanations/designed-degradation/", "/reference/browser-runtime/"]
+kind = "paraphrase"
+
+[[query]]
+q = "prove a change didn't make results worse"
+expect = ["/tutorials/evaluate-your-search/", "/how-to/reindex-in-ci/"]
+kind = "paraphrase"
+
+[[query]]
+q = "shrink vectors to save bandwidth"
+expect = ["/how-to/manage-the-model/", "/reference/configuration/"]
+kind = "paraphrase"
+
+# --------------------------------------------------------- navigational
+[[query]]
+q = "getting started"
+expect = ["/tutorials/getting-started/"]
+kind = "navigational"
+
+[[query]]
+q = "cli"
+expect = ["/reference/cli/"]
+kind = "navigational"
+
+[[query]]
+q = "install"
+expect = ["/how-to/install/", "/tutorials/getting-started/"]
+kind = "navigational"
+
+[[query]]
+q = "queries.toml"
+expect = ["/reference/queries-toml/", "/tutorials/evaluate-your-search/"]
+kind = "navigational"
+
+# ----------------------------------------------------- negative control
+# Checked against the corpus word-by-word. NOT usable here: "sourdough"
+# (quoted as an example in two pages), "watercolor"-adjacent art terms are
+# fine but "patterns"/"plan"/"budget" all appear in prose.
+[[query]]
+q = "espresso grinder burrs"
+expect = []
+kind = "negative"
+
+[[query]]
+q = "toddler bedtime routine"
+expect = []
+kind = "negative"
