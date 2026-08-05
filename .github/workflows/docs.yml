@@ -1,0 +1,93 @@
+name: Docs
+on:
+  push:
+    branches: [main]
+    paths: ["website/**", "crates/**", "Cargo.lock", ".github/workflows/docs.yml"]
+  pull_request:
+    paths: ["website/**", "crates/**", "Cargo.lock", ".github/workflows/docs.yml"]
+env:
+  ZOLA_REV: "85193b38c742df51151bf7dc9ab6504e91a4e6a1"   # same pin as unicow.dev
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo (workspace build)
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git
+            target
+          key: cargo-docs-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build chops-search from this commit
+        run: cargo install --path crates/chops-search --locked
+
+      - name: Cache Zola binary
+        id: cache-zola
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/bin/zola
+          key: zola-${{ runner.os }}-${{ env.ZOLA_REV }}
+
+      - name: Build Zola from source
+        if: steps.cache-zola.outputs.cache-hit != 'true'
+        run: cargo install --git https://github.com/getzola/zola.git --rev ${{ env.ZOLA_REV }} --locked
+
+      - name: Restore model
+        id: model
+        uses: actions/cache/restore@v5
+        with:
+          path: website/.chops-search/model
+          key: model-${{ hashFiles('website/.chops-search/model.lock.json') }}
+
+      - name: Fetch model at locked revision
+        if: steps.model.outputs.cache-hit != 'true'
+        working-directory: website
+        run: |
+          REV=$(jq -r .revision .chops-search/model.lock.json)
+          chops-search model fetch --revision "$REV"
+
+      - name: Verify model
+        working-directory: website
+        run: chops-search model verify
+
+      - name: Save model
+        if: always() && steps.model.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: website/.chops-search/model
+          key: model-${{ hashFiles('website/.chops-search/model.lock.json') }}
+
+      - name: Build search index
+        working-directory: website
+        run: chops-search build
+
+      - name: Eval docs search
+        if: hashFiles('website/fixtures/queries.toml') != ''
+        working-directory: website
+        run: chops-search eval --fail-under 0.85
+
+      - name: Build site
+        working-directory: website
+        run: ~/.cargo/bin/zola build
+
+      - name: Check internal links
+        working-directory: website
+        run: ~/.cargo/bin/zola check --skip-external-links
+
+      - name: Deploy
+        if: github.event_name == 'push'
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: website
+          command: deploy
