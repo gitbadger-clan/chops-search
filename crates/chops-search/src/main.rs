@@ -229,6 +229,13 @@ almost always visible in the chunk count or the term frequencies.")]
         /// Rows to print. Default 20.
         #[arg(long, value_name = "N", default_value_t = 20)]
         limit: usize,
+
+        /// Minimum keyword-confidence ratio. Default 0.30.
+        ///
+        /// For diagnosing the keyword evidence gate: below it the
+        /// keyword list is suppressed from fusion. 0 disables.
+        #[arg(long, value_name = "FRACTION")]
+        kw_floor: Option<f32>,
     },
 
     /// Score the engine against a labelled query set.
@@ -266,6 +273,14 @@ the real ones.")]
         /// as unrelated, which is what makes empty results possible.
         #[arg(long, value_name = "COS")]
         min_cos: Option<f32>,
+        /// Minimum keyword-confidence ratio. Default 0.30.
+        ///
+        /// For sweeping the keyword evidence gate. Below it the keyword
+        /// engine submits nothing to fusion: a ranking assembled from
+        /// stopword coincidences or a lone prefix expansion is worse
+        /// than no ranking. 0 disables the gate.
+        #[arg(long, value_name = "FRACTION")]
+        kw_floor: Option<f32>,
         /// Coefficient on the chunk-count correction. Default 0.02.
         ///
         /// For sweeping. Longer documents get more chances at a high
@@ -337,10 +352,11 @@ fn main() -> Result<()> {
             artifacts,
             limit,
             query,
+            kw_floor,
         } => {
             let cfg = load_config(&site)?;
             let dir = artifacts.unwrap_or(cfg.out);
-            chops_search::explain::explain(&dir, &query, limit)
+            chops_search::explain::explain(&dir, &query, limit, kw_floor)
         }
         Cmd::Eval {
             artifacts,
@@ -349,6 +365,7 @@ fn main() -> Result<()> {
             fail_under,
             min_cos,
             chunk_penalty,
+            kw_floor,
         } => {
             let cfg = load_config(&site)?;
             let dir = artifacts.unwrap_or_else(|| cfg.out.clone());
@@ -360,6 +377,7 @@ fn main() -> Result<()> {
                 fail_under,
                 min_cos,
                 chunk_penalty,
+                kw_floor,
             )
         }
         Cmd::Model { action } => {

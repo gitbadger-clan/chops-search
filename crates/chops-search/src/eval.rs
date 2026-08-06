@@ -40,6 +40,7 @@ pub fn eval(
     fail_under: f32,
     min_cos: Option<f32>,
     chunk_penalty: Option<f32>,
+    kw_floor: Option<f32>,
 ) -> Result<()> {
     let cases = load_cases(queries, kind_filter)?;
     if cases.is_empty() {
@@ -65,10 +66,13 @@ pub fn eval(
     if let Some(v) = chunk_penalty {
         opts.chunk_penalty = v;
     }
+    if let Some(v) = kw_floor {
+        opts.kw_confidence = v;
+    }
     engine.set_score_opts(opts);
     println!(
-        "scoring:   min_cos {:.2}, chunk_penalty {:.3}",
-        opts.min_cos, opts.chunk_penalty
+        "scoring:   min_cos {:.2}, chunk_penalty {:.3}, kw_floor {:.2}",
+        opts.min_cos, opts.chunk_penalty, opts.kw_confidence
     );
     engine
         .ingest(0, &prefix_bytes)

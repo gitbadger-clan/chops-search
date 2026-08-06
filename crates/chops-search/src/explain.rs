@@ -38,7 +38,7 @@ pub fn list_docs(artifacts: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn explain(artifacts: &Path, query: &str, limit: usize) -> Result<()> {
+pub fn explain(artifacts: &Path, query: &str, limit: usize, kw_floor: Option<f32>) -> Result<()> {
     // ---- Load exactly what the browser would ---------------------------
     let a = crate::artifacts::resolve(artifacts)?;
     let meta_bytes = fs::read(&a.meta).with_context(|| format!("{}", a.meta.display()))?;
@@ -83,6 +83,20 @@ pub fn explain(artifacts: &Path, query: &str, limit: usize) -> Result<()> {
     let kw = index.keyword_index();
     println!("kw:        avgdl={:.1}", kw.avgdl);
     let terms = kw.resolve(&words, true);
+    let floor = kw_floor.unwrap_or(chops_search_core::score::KW_CONFIDENCE);
+    let kw_conf = kw.confidence(&words, &terms);
+    let kw_gated = kw_conf < floor;
+    println!(
+        "kw:        avgdl={:.1}, confidence {:.2} (floor {:.2}){}",
+        kw.avgdl,
+        kw_conf,
+        floor,
+        if kw_gated {
+            " — keyword list SUPPRESSED"
+        } else {
+            ""
+        }
+    );
     let mut kw_scores: HashMap<u16, f32> = HashMap::new();
     for t in &terms {
         let postings = &kw.terms[&t.text];
@@ -106,7 +120,11 @@ pub fn explain(artifacts: &Path, query: &str, limit: usize) -> Result<()> {
             println!("keyword:   {w:?} matches no documents");
         }
     }
-    let kw_ranked = kw.rank_terms(&terms);
+    let kw_ranked = if kw_gated {
+        Vec::new()
+    } else {
+        kw.rank_terms(&terms)
+    };
 
     // ---- Semantic side, with per-doc best cosine + chunk counts --------
     let mut best_cos = vec![f32::NEG_INFINITY; index.docs.len()];
