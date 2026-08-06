@@ -1,15 +1,25 @@
 // Web Worker: the dumb byte pump. All decisions live in the wasm engine;
 // this file fetches, ingests, renders nothing, and never touches vectors.
 //
-// Changes from v4: SNIPPETS. After a ranking is known, the engine names
-// the best-matching chunk per result and this worker range-fetches those
-// chunks' text from snippets.bin. Two messages per query rather than one:
-// results render immediately, snippets fill in when they land — the same
-// progressive pattern as keyword-then-semantic, for the same reason.
+// Changes from v5: WARMTH. Two costs that only show on range-hostile
+// hosts or under fast typing were measured in the wild and closed here:
+//
+//   - A multi-range plan on a host that ignores Range used to fall back
+//     to N parallel full-file downloads (observed: 4 × 3.78 MB for one
+//     query). The 200-fallback now cancels its body, flips a
+//     `rangeHostile` flag, and joins ONE shared full-ingest promise.
+//     Later queries on the same session skip ranges entirely.
+//
+//   - Snippets had no warmth at any layer: the same chunks re-fetched on
+//     every keystroke (browsers do not serve ranged requests from the
+//     HTTP cache), and the 200-fallback sliced the whole blob and threw
+//     it away. Snippet fetches are now memoized by chunk id for the
+//     session, concurrent requests for one chunk coalesce, and a 200
+//     keeps the blob so every later snippet is a memory slice.
 //
 // The snippet OFFSET TABLE is fetched once at boot as a single small
 // range (a few hundred bytes); the text blob itself is never fetched
-// whole. That's what keeps snippets off the eager payload.
+// whole unless the host forces a 200.
 //
 // Protocol (postMessage):
 //   in : { type: 'init', base }
@@ -25,6 +35,15 @@ let files = null;
 let latestGen = 0;
 let rowCache = null;
 let snips = null; // { offsets: Uint32Array, textStart: number }
+
+// Warmth state. All session-lifetime: the worker dies with the page, and
+// everything here is keyed to the build hash via the manifest loaded at
+// boot, so staleness across deploys is impossible by construction.
+let fullyIngested = false; // rows: engine holds the whole matrix
+let fullIngest = null; // rows: in-flight full-file dedup
+let rangeHostile = false; // learned from the first 200-for-a-Range
+const snippetMemo = new Map(); // chunk id -> Promise<string|null>
+let snippetBlob = null; // whole snippets file, if a 200 ever hands it over
 
 const CAN_DECOMPRESS = typeof DecompressionStream !== 'undefined';
 
@@ -93,6 +112,12 @@ async function loadSnippetHeader(name) {
     if (dv.getUint32(8, true) !== n) return null; // header/index disagree
     const offsets = new Uint32Array(n + 1);
     for (let i = 0; i <= n; i++) offsets[i] = dv.getUint32(12 + i * 4, true);
+    // A 200 here means the host ignored Range and buf is the WHOLE file:
+    // keep it, and every snippet becomes a memory slice from the start.
+    if (r.status === 200 && buf.length > headerLen) {
+      rangeHostile = true;
+      snippetBlob = buf;
+    }
     return { offsets, textStart: headerLen };
   } catch {
     return null;
@@ -147,7 +172,30 @@ function contentRangeStart(response) {
   return m ? Number(m[1]) : null;
 }
 
+/// Fetch the ENTIRE rows file once, shared across every caller that
+/// discovers the host is range-hostile. The promise is the dedup: N
+/// parallel fetchRange fallbacks join one download instead of starting N.
+async function ingestFull() {
+  if (fullyIngested) return;
+  if (!fullIngest) {
+    fullIngest = (async () => {
+      const bytes = await fetchBytes(`${base}/${files.rows}`);
+      engine.ingest(0, bytes);
+      fullyIngested = true;
+    })();
+    // A failed full ingest must be retryable on the next query, not
+    // poison the session with a rejected promise forever.
+    fullIngest.catch(() => {
+      fullIngest = null;
+    });
+  }
+  return fullIngest;
+}
+
 async function fetchRange(start, end) {
+  if (fullyIngested) return;
+  if (rangeHostile) return ingestFull();
+
   const rowsUrl = `${base}/${files.rows}`;
   const key = `${rowsUrl}?r=${start}-${end}`;
 
@@ -177,28 +225,58 @@ async function fetchRange(start, end) {
       }
     }
   } else if (r.ok) {
-    engine.ingest(0, new Uint8Array(await r.arrayBuffer()));
+    // Host ignored Range. Learn it, drop this body mid-stream, and join
+    // the single shared full ingest — never N parallel full downloads.
+    rangeHostile = true;
+    try {
+      r.body?.cancel();
+    } catch {
+      /* body already consumed or locked — nothing to save */
+    }
+    return ingestFull();
   } else {
     throw new Error(`range fetch failed: ${r.status}`);
   }
 }
 
-/// Fetch the text of one chunk. Small enough (~600 bytes) that these go
-/// out in parallel and land well inside one RTT of each other.
-async function fetchSnippet(chunk) {
-  if (!snips || chunk < 0 || chunk + 1 >= snips.offsets.length) return null;
+/// Fetch the text of one chunk, memoized by chunk id for the session.
+/// Typing "mod" → "mode" → "model" mostly re-ranks the same chunks; the
+/// memo turns those repeats into zero network. Memoizing the PROMISE
+/// (not the string) also coalesces concurrent requests for one chunk.
+function fetchSnippet(chunk) {
+  if (!snips || chunk < 0 || chunk + 1 >= snips.offsets.length) {
+    return Promise.resolve(null);
+  }
+  const hit = snippetMemo.get(chunk);
+  if (hit) return hit;
+  const p = fetchSnippetUncached(chunk);
+  snippetMemo.set(chunk, p);
+  // A null is a failure (offline, blocked), not content — don't memoize
+  // it, so the next query retries instead of blanking forever.
+  p.then((v) => {
+    if (v === null) snippetMemo.delete(chunk);
+  });
+  return p;
+}
+
+async function fetchSnippetUncached(chunk) {
   const lo = snips.textStart + snips.offsets[chunk];
   const hi = snips.textStart + snips.offsets[chunk + 1];
   if (hi <= lo) return null; // empty chunk
+  if (snippetBlob) {
+    return new TextDecoder().decode(snippetBlob.subarray(lo, hi));
+  }
   try {
     const r = await fetch(`${base}/${files.snippets}`, {
       headers: { Range: `bytes=${lo}-${hi - 1}` },
     });
     if (!r.ok) return null;
     if (r.status === 206) return await r.text();
-    // 200: server ignored Range and sent the whole blob — slice it.
-    const buf = new Uint8Array(await r.arrayBuffer());
-    return new TextDecoder().decode(buf.subarray(lo, hi));
+    // 200: server ignored Range and sent the whole blob — KEEP it this
+    // time. Every later snippet in the session is a memory slice.
+    rangeHostile = true;
+    snippetBlob = new Uint8Array(await r.arrayBuffer());
+    return new TextDecoder().decode(snippetBlob.subarray(lo, hi));
   } catch {
     return null;
   }
