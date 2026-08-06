@@ -213,14 +213,40 @@ impl KeywordIndex {
     }
 }
 
+/// Longest compound worth indexing, in bytes. A 70-char kebab-case slug
+/// is a URL, not a search term, and unbounded compounds would let one
+/// pathological line mint arbitrarily large terms.
+const MAX_COMPOUND: usize = 64;
+/// Joiners that glue identifier compounds: data-chops-open, prefix_rows,
+/// model.rows. Single joiner between alphanumeric runs only.
+const JOINERS: &[char] = &['-', '_', '.'];
+
 /// Word split for the KEYWORD index — deliberately not BertPreTokenizer.
 /// Keyword search wants every non-alphanumeric to be a boundary, so
 /// `25°C` yields "25" and "c" rather than one unsearchable term. Sharing
 /// `Vocab::words` coupled keyword recall to BERT's symbol/punctuation
 /// asymmetry, which exists for embedding parity and has no business
 /// shaping an inverted index.
+///
+/// COMPOUNDS: identifiers joined by single `-`, `_`, or `.` between
+/// alphanumeric runs are additionally emitted whole ("data-chops-open",
+/// "prefix_rows", "v0.2.10"), joiners preserved. Without this, an
+/// identifier query decomposes into its parts and any part that happens
+/// to be corpus-common ("chops" on a chops-search docs site) turns the
+/// ranking into stopword noise; the whole compound is a rare term with
+/// the idf to match. Both the builder and the query path call this
+/// function, so emission is symmetric by construction, and the sorted
+/// term list picks compounds up for trailing-term prefix expansion —
+/// typing "data-cho" completes into the attribute name.
+///
+/// Rules: a joiner must have alphanumerics on BOTH sides to count
+/// (doubled, leading, and trailing joiners break the candidate), and
+/// spans longer than MAX_COMPOUND are dropped. A compound always
+/// contains a joiner, so it can never duplicate a part.
 pub fn keyword_words(normalized: &str) -> Vec<&str> {
     let mut out = Vec::new();
+
+    // Pass 1: parts. Every non-alphanumeric is a boundary.
     let mut start: Option<usize> = None;
     for (i, c) in normalized.char_indices() {
         if c.is_alphanumeric() {
@@ -234,6 +260,50 @@ pub fn keyword_words(normalized: &str) -> Vec<&str> {
     if let Some(s) = start {
         out.push(&normalized[s..]);
     }
+
+    // Pass 2: compounds. A candidate opens at an alphanumeric and
+    // accumulates `alnum+ (joiner alnum+)*`; anything else flushes it.
+    // `pending` is a joiner waiting for an alphanumeric to legitimize
+    // it; `interior` counts joiners that got one; `alnum_end` trims a
+    // dangling joiner off the emitted span ("model." emits nothing,
+    // "model.rows" emits whole).
+    let mut c_start: Option<usize> = None;
+    let mut alnum_end = 0usize;
+    let mut pending = false;
+    let mut interior = 0usize;
+
+    for (i, c) in normalized.char_indices() {
+        if c.is_alphanumeric() {
+            if c_start.is_none() {
+                c_start = Some(i);
+                interior = 0;
+            }
+            if pending {
+                interior += 1;
+                pending = false;
+            }
+            alnum_end = i + c.len_utf8();
+        } else if JOINERS.contains(&c) && c_start.is_some() && !pending {
+            pending = true;
+        } else {
+            // Boundary, doubled joiner, or joiner with nothing before it.
+            if let Some(s) = c_start.take()
+                && interior > 0
+                && alnum_end - s <= MAX_COMPOUND
+            {
+                out.push(&normalized[s..alnum_end]);
+            }
+            pending = false;
+            interior = 0;
+        }
+    }
+    if let Some(s) = c_start
+        && interior > 0
+        && alnum_end - s <= MAX_COMPOUND
+    {
+        out.push(&normalized[s..alnum_end]);
+    }
+
     out
 }
 
@@ -405,4 +475,50 @@ mod tests {
         assert_eq!(keyword_words("hello world"), vec!["hello", "world"]);
         assert!(keyword_words("...").is_empty());
     }
+    #[test]
+    fn compounds_emit_whole_and_parts() {
+        assert_eq!(
+            keyword_words("data-chops-open"),
+            vec!["data", "chops", "open", "data-chops-open"]
+        );
+        assert_eq!(
+            keyword_words("prefix_rows"),
+            vec!["prefix", "rows", "prefix_rows"]
+        );
+        assert_eq!(keyword_words("v0.2.10"), vec!["v0", "2", "10", "v0.2.10"]);
+    }
+
+    #[test]
+    fn dangling_and_doubled_joiners_break_the_candidate() {
+        // Trailing joiner: sentence-final "model." is prose, not an identifier.
+        assert_eq!(keyword_words("model."), vec!["model"]);
+        // Doubled joiner kills the left candidate; the right side restarts.
+        assert_eq!(keyword_words("a--b-c"), vec!["a", "b", "c", "b-c"]);
+        // Leading joiner is not a compound opener (CLI flags still work out:
+        // "--min-cos" emits the useful "min-cos").
+        assert_eq!(keyword_words("--min-cos"), vec!["min", "cos", "min-cos"]);
+    }
+
+    #[test]
+    fn non_joiner_symbols_still_split_without_compounding() {
+        assert_eq!(keyword_words("25°c"), vec!["25", "c"]);
+    }
+
+    #[test]
+    fn oversized_compounds_are_dropped() {
+        let long = ["part"; 20].join("-"); // 99 bytes of kebab
+        let words = keyword_words(&long);
+        assert_eq!(words.iter().filter(|w| w.contains('-')).count(), 0);
+        assert_eq!(words.len(), 20);
+    }
+
+    #[test]
+    fn compound_emission_is_query_build_symmetric() {
+        // The property the whole change rests on: both sides tokenize alike.
+        let doc = keyword_words("wire data-chops-open onto the trigger");
+        let q = keyword_words("data-chops-open");
+        assert!(doc.contains(&"data-chops-open"));
+        assert_eq!(q.last(), Some(&"data-chops-open"));
+    }
+
 }
