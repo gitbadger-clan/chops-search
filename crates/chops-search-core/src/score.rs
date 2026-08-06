@@ -52,10 +52,19 @@ pub const MIN_COS: f32 = 0.20;
 /// `chops-search eval --chunk-penalty`; 0.0 disables the correction entirely.
 pub const CHUNK_PENALTY: f32 = 0.02;
 
+/// Minimum fraction of the query's potential idf mass that must have
+/// matched for the keyword ranking to be trusted at all. Below this, the
+/// keyword engine submits nothing to fusion: a ranking assembled from
+/// stopword coincidences or a single prefix expansion is worse than no
+/// ranking, because RRF consumes ranks and launders away how weak the
+/// evidence was. Sweep with `chops-search eval --kw-floor`; 0.0 disables.
+pub const KW_CONFIDENCE: f32 = 0.30;
+
 #[derive(Debug, Clone, Copy)]
 pub struct ScoreOpts {
     pub min_cos: f32,
     pub chunk_penalty: f32,
+    pub kw_confidence: f32,
 }
 
 /// A ranked document plus the chunk that earned it its score — the chunk
@@ -72,6 +81,7 @@ impl Default for ScoreOpts {
         ScoreOpts {
             min_cos: MIN_COS,
             chunk_penalty: CHUNK_PENALTY,
+            kw_confidence: KW_CONFIDENCE,
         }
     }
 }
@@ -83,6 +93,7 @@ impl ScoreOpts {
         ScoreOpts {
             min_cos: f32::NEG_INFINITY,
             chunk_penalty: 0.0,
+            kw_confidence: 0.0,
         }
     }
 }
@@ -212,6 +223,7 @@ mod tests {
         let opts = ScoreOpts {
             min_cos: 0.20,
             chunk_penalty: 0.0,
+            kw_confidence: 0.0,
         };
         let ranked = rank_docs(&q, &chunks, 1, 0.01, &[0, 1], 2, opts);
         assert_eq!(ranked, vec![0], "0.04 should be below the floor");
@@ -224,6 +236,7 @@ mod tests {
         let opts = ScoreOpts {
             min_cos: 0.20,
             chunk_penalty: 0.0,
+            kw_confidence: 0.0,
         };
         assert!(rank_docs(&q, &chunks, 1, 0.01, &[0, 1], 2, opts).is_empty());
     }
@@ -246,6 +259,7 @@ mod tests {
         let opts = ScoreOpts {
             min_cos: f32::NEG_INFINITY,
             chunk_penalty: 0.05,
+            ..Default::default()
         };
         let corrected = rank_docs(&q, &chunks, 1, 0.01, &chunk_doc, 2, opts);
         assert_eq!(corrected, vec![1, 0]);
@@ -278,6 +292,7 @@ mod tests {
         let opts = ScoreOpts {
             min_cos: 0.20,
             chunk_penalty: 0.5,
+            ..Default::default()
         };
         assert_eq!(
             rank_docs(&q, &chunks, 1, 0.01, &chunk_doc, 1, opts),

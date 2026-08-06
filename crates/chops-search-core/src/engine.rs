@@ -140,7 +140,14 @@ impl Engine {
         // out-of-vocabulary terms are first-class here.
         let norm = Vocab::normalize(query);
         let words: Vec<&str> = crate::keyword::keyword_words(&norm);
-        let kw_ranked = self.kw.rank(&words);
+        let kw_ranked = {
+            let terms = self.kw.resolve(&words, true);
+            if self.kw.confidence(&words, &terms) < self.opts.kw_confidence {
+                Vec::new()
+            } else {
+                self.kw.rank_terms(&terms)
+            }
+        };
 
         let ids = self.vocab.tokenize(query);
         let fused = match self.store.embed(&ids) {

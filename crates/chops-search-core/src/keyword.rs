@@ -104,6 +104,51 @@ impl KeywordIndex {
         }
     }
 
+    /// Fraction of the query's potential idf mass that actually matched.
+    ///
+    /// Each distinct typed word contributes its idf to `potential` if it
+    /// is a corpus term, else idf(0) — an unmatched word is evidence
+    /// against keyword confidence at full strength. EXCEPTION: the
+    /// trailing word, when it produced expansions, contributes nothing
+    /// to potential. It is still being typed, and judging an incomplete
+    /// word as a miss would gate type-ahead on small corpora, where
+    /// idf(1)/idf(0) is too coarse for any fixed floor to separate
+    /// mid-typing from junk. Its expansions still count in `matched`.
+    ///
+    /// When potential is zero — the query is nothing but an in-progress
+    /// word — expansions are the only possible evidence: full confidence
+    /// if they exist, zero if not.
+    pub fn confidence(&self, query_words: &[&str], terms: &[Term]) -> f32 {
+        let max_idf = self.idf(0);
+        let has_expansions = terms.iter().any(|t| t.expanded);
+        let last = query_words.last().copied();
+        let mut seen: Vec<&str> = Vec::new();
+        let mut potential = 0.0f32;
+        for &w in query_words {
+            if seen.contains(&w) {
+                continue;
+            }
+            seen.push(w);
+            potential += match self.terms.get(w) {
+                Some(p) => self.idf(p.len()),
+                None if Some(w) == last && has_expansions => 0.0,
+                None => max_idf,
+            };
+        }
+        let matched: f32 = terms
+            .iter()
+            .filter_map(|t| {
+                self.terms
+                    .get(&t.text)
+                    .map(|p| t.weight * self.idf(p.len()))
+            })
+            .sum();
+        if potential <= 0.0 {
+            return if matched > 0.0 { 1.0 } else { 0.0 };
+        }
+        (matched / potential).min(1.0)
+    }
+
     /// BM25 idf. Floors at ~0 for terms present in every document.
     pub fn idf(&self, df: usize) -> f32 {
         let n = self.n_docs as f32;
@@ -310,6 +355,23 @@ pub fn keyword_words(normalized: &str) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::score::KW_CONFIDENCE;
+
+    /// Corpus shaped like the docs site: a term for everything common, a
+    /// couple of mid-frequency words, and one rare term ("routinely")
+    /// reachable only by prefix-expanding "routine".
+    fn confidence_index() -> KeywordIndex {
+        let mut terms: HashMap<Box<str>, Vec<(u16, u16)>> = HashMap::new();
+        terms.insert(Box::from("the"), vec![(0, 9), (1, 7), (2, 8), (3, 6)]);
+        terms.insert(Box::from("to"), vec![(0, 5), (1, 4), (2, 3), (3, 5)]);
+        terms.insert(Box::from("what"), vec![(0, 2), (1, 1), (2, 2)]);
+        terms.insert(Box::from("when"), vec![(0, 1), (1, 2), (3, 1)]);
+        terms.insert(Box::from("happens"), vec![(1, 1)]);
+        terms.insert(Box::from("process"), vec![(0, 2), (2, 1)]);
+        terms.insert(Box::from("routinely"), vec![(2, 1)]);
+        terms.insert(Box::from("search"), vec![(0, 6), (1, 5), (2, 4), (3, 7)]);
+        KeywordIndex::new(4, terms)
+    }
 
     fn index() -> KeywordIndex {
         let mut terms: HashMap<Box<str>, Vec<(u16, u16)>> = HashMap::new();
@@ -521,4 +583,65 @@ mod tests {
         assert_eq!(q.last(), Some(&"data-chops-open"));
     }
 
+    #[test]
+    fn expansion_only_multiword_query_is_suppressed() {
+        // toddler-shape: three typed words, none a corpus term, one
+        // damped expansion of the trailing word. A lone prefix expansion
+        // cannot carry a 3-word query.
+        let idx = confidence_index();
+        let words = ["toddler", "bedtime", "routine"];
+        let terms = idx.resolve(&words, true);
+        assert!(!terms.is_empty(), "expected the routinely expansion");
+        assert!(terms.iter().all(|t| t.expanded));
+        assert!(idx.confidence(&words, &terms) < KW_CONFIDENCE);
+    }
+
+    #[test]
+    fn stopword_matches_do_not_carry_a_query() {
+        // unicow-shape: the glue words match, every discriminating word
+        // ("queued", "jobs", "dies") misses at max idf.
+        let idx = confidence_index();
+        let words = [
+            "what", "happens", "to", "queued", "jobs", "when", "the", "process", "dies",
+        ];
+        let terms = idx.resolve(&words, true);
+        assert!(idx.confidence(&words, &terms) < KW_CONFIDENCE);
+    }
+
+    #[test]
+    fn single_word_typing_survives_the_gate() {
+        // Mid-type: one typed word, unmatched, rare completions at
+        // PREFIX_DAMP. The floor is chosen to sit under this ratio.
+        let idx = prefix_index();
+        let words = ["chromiumox"];
+        let terms = idx.resolve(&words, true);
+        assert!(terms.iter().all(|t| t.expanded));
+        assert!(idx.confidence(&words, &terms) >= KW_CONFIDENCE);
+    }
+
+    #[test]
+    fn fully_matched_query_is_confident() {
+        let idx = index();
+        let words = ["pydub"];
+        let terms = idx.resolve(&words, true);
+        assert!(idx.confidence(&words, &terms) > 0.9);
+    }
+
+    #[test]
+    fn confidence_of_empty_query_is_zero() {
+        let idx = index();
+        assert_eq!(idx.confidence(&[], &[]), 0.0);
+    }
+
+    #[test]
+    fn trailing_expansion_does_not_mask_earlier_misses() {
+        // "toddler routin": the trailing word is being typed and expands,
+        // but "toddler" is a completed miss at max idf — one live
+        // expansion must not launder a query whose other words all fail.
+        let idx = confidence_index();
+        let words = ["toddler", "routin"];
+        let terms = idx.resolve(&words, true);
+        assert!(terms.iter().any(|t| t.expanded));
+        assert!(idx.confidence(&words, &terms) < KW_CONFIDENCE);
+    }
 }
