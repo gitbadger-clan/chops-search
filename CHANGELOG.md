@@ -4,6 +4,49 @@ Notable changes per release. The release workflow reads the section
 matching the tag and puts it in the GitHub release, with the commit list
 appended underneath.
 
+## [0.2.13]
+
+### Added
+- A keyword confidence gate. The keyword engine now submits nothing to
+  fusion when the matched idf mass falls below a fraction of the query's
+  potential mass (`kw_floor`, default 0.30). A ranking assembled from
+  stopword coincidences or a single prefix expansion is worse than no
+  ranking, because RRF consumes ranks and launders away how weak the
+  evidence was. The trailing word is exempt from the denominator when it
+  produced expansions, so type-ahead still works mid-word.
+- Identifier compounds are indexed whole alongside their parts, so
+  `data-chops-open`, `prefix_rows`, and `v0.2.10` are single rare terms
+  rather than decomposing into pieces that a docs corpus makes common.
+  Both the builder and the query path call the same function, so emission
+  is symmetric by construction.
+- A corroboration gate for the semantic side, shipping inert. When the
+  keyword list is empty and nothing in the corpus stands out from the
+  pack, a semantic-only ranking is noise rather than an answer. Two knobs
+  control it: `min_gap` (minimum top-median cosine contrast, 0 disables)
+  and `strong_cos` (a top cosine at or above this is never suppressed,
+  however flat the field; disables at infinity, not at 0). Both default
+  to off, so ranking is unchanged unless you set them.
+- `--min-gap` and `--strong-cos` on `eval` and `query`, and `--kw-floor`
+  on both, for sweeping.
+- `query` prints the top raw cosine and the top-median gap, and says which
+  gate suppressed a list when one did.
+
+### Changed
+- `Engine::search_detailed` returns the full evidence behind a search:
+  per-term keyword scoring, the gates' verdicts, pre-floor cosines, and
+  the fused order with per-engine contributions. `search()` is a view of
+  it, and `chops-search query` prints it. The explain path previously
+  reimplemented keyword scoring, chunk scanning, and RRF arithmetic
+  against the same artifacts; it had already drifted once, when BM25
+  landed in core a commit earlier. It now restates nothing.
+- Semantic scoring splits into `score_docs` (max-pooling, the
+  measurement) and `rank_scored` (floor, penalty, sort — the judgment).
+  Statistics about the whole field, like the top-median gap, read the
+  measurement, so the relevance floor cannot distort them by filtering
+  before they are computed.
+
+### Fixed
+- `chops-search query` printed its keyword summary line twice.
 ## [0.2.10]
 
 ### Fixed

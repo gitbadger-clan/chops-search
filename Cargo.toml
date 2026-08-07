@@ -1,5 +1,5 @@
 [workspace.package]
-version = "0.2.12"
+version = "0.2.13"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/gitbadger-clan/chops-search"
@@ -19,7 +19,7 @@ members = [
 # Internal. `version` is what the published crate resolves against; `path`
 # is what local builds use. Both are required to publish, and living here
 # means `cargo xtask version` updates every consumer at once.
-chops-search-core = { path = "crates/chops-search-core", version = "0.2.12" }
+chops-search-core = { path = "crates/chops-search-core", version = "0.2.13" }
 # Size discipline for the wasm blob. The CLI also inherits this; if build
 # times or CLI throughput ever matter, add a per-package override.
 [profile.release]
