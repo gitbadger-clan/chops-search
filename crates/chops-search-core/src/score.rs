@@ -76,6 +76,18 @@ pub struct Ranked {
     pub score: f32,
 }
 
+/// Raw per-doc evidence, before the floor and penalty judge it. This is
+/// what the report layer needs: sub-floor cosines are exactly the numbers
+/// explain must print for documents the semantic side rejected.
+pub struct DocScores {
+    /// Best raw cosine per doc; NEG_INFINITY where a doc has no chunks.
+    pub best: Vec<f32>,
+    /// Chunk that produced it; u32::MAX where a doc has no chunks.
+    pub best_chunk: Vec<u32>,
+    /// Chunks per doc, counted in the same pass.
+    pub counts: Vec<usize>,
+}
+
 impl Default for ScoreOpts {
     fn default() -> Self {
         ScoreOpts {
@@ -110,7 +122,6 @@ pub fn chunk_correction(n: usize, coeff: f32) -> f32 {
 pub fn min_cos_for(dim: usize) -> f32 {
     MIN_COS * (256.0 / dim.max(1) as f32).sqrt()
 }
-
 /// Rank documents by their best-scoring chunk, descending.
 ///
 /// Doc ids only. Callers that need to know WHICH chunk won — for
@@ -128,6 +139,73 @@ pub fn rank_docs(
         .into_iter()
         .map(|r| r.doc)
         .collect()
+}
+/// Max-pooling only — the measurement half, ending where the floor begins.
+///
+/// - `q`: normalized f32 query vector, length `dim`
+/// - `chunk_vecs`: n_chunks × dim int8
+/// - `chunk_doc`: chunk index → doc id
+/// - `n_docs`: total docs (doc ids are 0..n_docs)
+pub fn score_docs(
+    q: &[f32],
+    chunk_vecs: &[i8],
+    dim: usize,
+    global_scale: f32,
+    chunk_doc: &[u16],
+    n_docs: usize,
+) -> DocScores {
+    debug_assert_eq!(q.len(), dim);
+    debug_assert_eq!(chunk_vecs.len(), chunk_doc.len() * dim);
+
+    let mut best = vec![f32::NEG_INFINITY; n_docs];
+    let mut best_chunk = vec![u32::MAX; n_docs];
+    let mut counts = vec![0usize; n_docs];
+    for (c, &doc) in chunk_doc.iter().enumerate() {
+        let d = doc as usize;
+        if d >= n_docs {
+            continue;
+        }
+        let row = &chunk_vecs[c * dim..(c + 1) * dim];
+        let mut acc = 0f32;
+        for (&qi, &vi) in q.iter().zip(row) {
+            acc += qi * vi as f32;
+        }
+        let s = acc * global_scale;
+        counts[d] += 1;
+        if s > best[d] {
+            best[d] = s;
+            best_chunk[d] = c as u32;
+        }
+    }
+    DocScores {
+        best,
+        best_chunk,
+        counts,
+    }
+}
+
+/// Floor + chunk penalty + sort — the judgment half.
+///
+/// Floor on RAW similarity, rank on ADJUSTED. Docs with no chunks are
+/// omitted, as are docs whose raw best similarity is below
+/// `opts.min_cos`. Ties break on doc id for byte-stable output.
+pub fn rank_scored(scores: &DocScores, opts: ScoreOpts) -> Vec<Ranked> {
+    let n_docs = scores.best.len();
+    let mut out: Vec<Ranked> = (0..n_docs)
+        .filter(|&d| scores.best[d] > f32::NEG_INFINITY && scores.best[d] >= opts.min_cos)
+        .map(|d| Ranked {
+            doc: d as u16,
+            chunk: scores.best_chunk[d],
+            score: scores.best[d] - chunk_correction(scores.counts[d], opts.chunk_penalty),
+        })
+        .collect();
+    out.sort_unstable_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(core::cmp::Ordering::Equal)
+            .then(a.doc.cmp(&b.doc))
+    });
+    out
 }
 
 /// As `rank_docs`, but also reports the winning chunk and the adjusted
@@ -326,5 +404,23 @@ mod tests {
         let chunks: Vec<i8> = vec![50, 50, 50];
         let out = rank_docs_detailed(&q, &chunks, 1, 1.0, &[0, 0, 0], 1, ScoreOpts::raw());
         assert_eq!(out[0].chunk, 0);
+    }
+
+    #[test]
+    fn score_docs_preserves_sub_floor_evidence() {
+        // The floor rejects doc1, but the measurement must still report
+        // its cosine — that's what explain prints for rejected docs.
+        let q = [1.0f32];
+        let chunks: Vec<i8> = vec![45, 4];
+        let ds = score_docs(&q, &chunks, 1, 0.01, &[0, 1], 2);
+        assert!((ds.best[1] - 0.04).abs() < 1e-6);
+        assert_eq!(ds.counts, vec![1, 1]);
+        let opts = ScoreOpts {
+            min_cos: 0.20,
+            chunk_penalty: 0.0,
+            kw_confidence: 0.0,
+        };
+        assert_eq!(rank_scored(&ds, opts).len(), 1);
+        assert_eq!(rank_scored(&ds, opts)[0].doc, 0);
     }
 }
