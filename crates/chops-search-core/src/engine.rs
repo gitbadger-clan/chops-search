@@ -33,11 +33,73 @@ pub struct Engine {
     /// doc id → chunk that produced its score in the last search;
     /// u32::MAX where the semantic side didn't rank the doc.
     best_chunk: Vec<u32>,
+    /// Chunks per doc, for the report's chunks/penalty columns on
+    /// keyword-only paths where no DocScores exists.
+    chunk_counts: Vec<u32>,
     /// First chunk index of each doc — chunks are contiguous per doc
     /// because the builder emits them in doc order. Used for the
     /// keyword-only snippet fallback.
     doc_first_chunk: Vec<u32>,
     opts: crate::score::ScoreOpts,
+}
+/// One term the keyword side resolved, with the numbers behind its score.
+pub struct TermEvidence {
+    pub term: Box<str>,
+    pub weight: f32,
+    /// True when this term came from prefix-expanding the trailing word.
+    pub expanded: bool,
+    pub df: u32,
+    pub idf: f32,
+}
+
+/// What the semantic side did for this query.
+pub enum SemanticStatus {
+    /// embed() returned nothing: all-OOV query, or rows not yet loaded.
+    Unavailable,
+    /// Embedded fine; nothing cleared the relevance floor.
+    BelowFloor,
+    Ranked,
+}
+
+/// One document's line in the fused order, with per-engine contributions.
+pub struct DocEvidence {
+    pub doc: u16,
+    /// The actual RRF sum this doc fused at.
+    pub fused: f32,
+    /// Position in the keyword list, when it contributed (0-based).
+    pub kw_rank: Option<u16>,
+    /// BM25 evidence — populated even when the confidence gate suppressed
+    /// the list, so a suppressed run still shows what the evidence was.
+    pub kw_score: f32,
+    /// Position in the semantic list, when it contributed (0-based).
+    pub sem_rank: Option<u16>,
+    /// Best raw chunk cosine; None when the semantic side never ran or
+    /// the doc has no chunks.
+    pub best_cos: Option<f32>,
+    pub penalty: f32,
+    pub chunks: u32,
+}
+
+/// The full evidence behind one search. `search()` is a view of this;
+/// explain prints it; nothing restates the arithmetic.
+pub struct SearchReport {
+    pub kw_words: Vec<Box<str>>,
+    pub terms: Vec<TermEvidence>,
+    /// Typed words that matched no corpus term (and, for the trailing
+    /// word, produced no expansions either).
+    pub unmatched: Vec<Box<str>>,
+    pub avgdl: f32,
+    pub kw_confidence: f32,
+    pub kw_gated: bool,
+    pub semantic: SemanticStatus,
+    /// Fused order, untruncated — callers apply their own limit.
+    pub docs: Vec<DocEvidence>,
+}
+
+impl SearchReport {
+    pub fn ids(&self, limit: usize) -> Vec<u16> {
+        self.docs.iter().take(limit).map(|d| d.doc).collect()
+    }
 }
 
 impl Engine {
@@ -55,11 +117,13 @@ impl Engine {
         let kw = index.keyword_index();
         let n_docs = index.docs.len();
         let mut doc_first_chunk = vec![u32::MAX; n_docs];
+        let mut chunk_counts = vec![0u32; n_docs];
         for (c, &doc) in index.chunk_doc.iter().enumerate() {
             let d = doc as usize;
             if d < n_docs && doc_first_chunk[d] == u32::MAX {
                 doc_first_chunk[d] = c as u32;
             }
+            chunk_counts[d] += 1;
         }
         Ok(Engine {
             vocab,
@@ -70,6 +134,7 @@ impl Engine {
             prefix_rows: meta.prefix_rows,
             used_semantic: false,
             best_chunk: vec![u32::MAX; n_docs],
+            chunk_counts,
             doc_first_chunk,
             // The floor scales with dimensionality, so it cannot be a
             // plain default: PCA raises noise cosines, and a value
@@ -136,58 +201,118 @@ impl Engine {
     /// Hybrid search: keyword tf-idf and semantic ranked lists fused with
     /// RRF. Returns ranked doc ids, truncated to `limit`.
     pub fn search(&mut self, query: &str, limit: usize) -> Vec<u16> {
+        self.search_detailed(query).ids(limit)
+    }
+
+    /// The full evidence behind one search: term-level keyword scoring,
+    /// the confidence gate's verdict, pre-floor semantic cosines, and the
+    /// fused order with per-engine contributions. `search()` is a view of
+    /// this; explain prints it; nothing restates the arithmetic.
+    pub fn search_detailed(&mut self, query: &str) -> SearchReport {
         // Keyword side works on word-level tokens (pre-WordPiece) so
         // out-of-vocabulary terms are first-class here.
         let norm = Vocab::normalize(query);
         let words: Vec<&str> = crate::keyword::keyword_words(&norm);
-        let kw_ranked = {
-            let terms = self.kw.resolve(&words, true);
-            if self.kw.confidence(&words, &terms) < self.opts.kw_confidence {
-                Vec::new()
-            } else {
-                self.kw.rank_terms(&terms)
-            }
+        let terms = self.kw.resolve(&words, true);
+        let kw_confidence = self.kw.confidence(&words, &terms);
+        let kw_gated = kw_confidence < self.opts.kw_confidence;
+        // Scores are computed even when gated: the report shows the
+        // evidence that WAS suppressed, which is the diagnostic point.
+        let kw_scores = self.kw.score_terms(&terms);
+        let kw_ranked = if kw_gated {
+            Vec::new()
+        } else {
+            KeywordIndex::rank_from_scores(&kw_scores)
         };
 
+        let term_evidence: Vec<TermEvidence> = terms
+            .iter()
+            .map(|t| {
+                let df = self.kw.terms.get(&t.text).map_or(0, |p| p.len());
+                TermEvidence {
+                    term: t.text.clone(),
+                    weight: t.weight,
+                    expanded: t.expanded,
+                    df: df as u32,
+                    idf: self.kw.idf(df),
+                }
+            })
+            .collect();
+        let unmatched: Vec<Box<str>> = words
+            .iter()
+            .filter(|w| !terms.iter().any(|t| t.text.as_ref() == **w))
+            .map(|w| Box::from(*w))
+            .collect();
+
         let ids = self.vocab.tokenize(query);
-        let fused = match self.store.embed(&ids) {
+        let (semantic, doc_scores, sem_ranked) = match self.store.embed(&ids) {
+            None => (SemanticStatus::Unavailable, None, Vec::new()),
             Some(q) => {
-                let detailed = score::rank_docs_detailed(
+                let ds = score::score_docs(
                     &q,
                     &self.index.chunk_vecs,
                     self.dim,
                     self.index.global_scale,
                     &self.index.chunk_doc,
                     self.index.docs.len(),
-                    self.opts,
                 );
-                // Reset before filling: a doc ranked last query but not
-                // this one must fall back rather than show a stale snippet.
-                self.best_chunk.iter_mut().for_each(|c| *c = u32::MAX);
-                for r in &detailed {
-                    self.best_chunk[r.doc as usize] = r.chunk;
-                }
-                let sem_ranked: Vec<u16> = detailed.iter().map(|r| r.doc).collect();
-                // The floor can empty this list: the query embedded fine,
-                // nothing was relevant. Reporting "hybrid" then would be a
-                // lie to the UI, so used_semantic tracks CONTRIBUTION, not
-                // merely that embedding succeeded.
-                self.used_semantic = !sem_ranked.is_empty();
-                if sem_ranked.is_empty() {
-                    kw_ranked
+                let ranked = score::rank_scored(&ds, self.opts);
+                let status = if ranked.is_empty() {
+                    SemanticStatus::BelowFloor
                 } else {
-                    rrf::fuse(&[&kw_ranked, &sem_ranked], rrf::K)
-                }
-            }
-            None => {
-                self.best_chunk.iter_mut().for_each(|c| *c = u32::MAX);
-                self.used_semantic = false;
-                kw_ranked
+                    SemanticStatus::Ranked
+                };
+                (status, Some(ds), ranked)
             }
         };
-        fused.into_iter().take(limit).collect()
-    }
 
+        // Reset before filling: a doc ranked last query but not this one
+        // must fall back rather than show a stale snippet.
+        self.best_chunk.iter_mut().for_each(|c| *c = u32::MAX);
+        for r in &sem_ranked {
+            self.best_chunk[r.doc as usize] = r.chunk;
+        }
+        let sem_ids: Vec<u16> = sem_ranked.iter().map(|r| r.doc).collect();
+        // used_semantic tracks CONTRIBUTION, not merely that embedding
+        // succeeded — the floor can empty the list.
+        self.used_semantic = !sem_ids.is_empty();
+
+        let fused = rrf::fuse_scored(&[&kw_ranked, &sem_ids], rrf::K);
+        let pos = |list: &[u16], d: u16| list.iter().position(|&x| x == d).map(|p| p as u16);
+        let docs: Vec<DocEvidence> = fused
+            .into_iter()
+            .map(|(d, f)| {
+                let du = d as usize;
+                let chunks = doc_scores
+                    .as_ref()
+                    .map_or(self.chunk_counts[du], |ds| ds.counts[du] as u32);
+                DocEvidence {
+                    doc: d,
+                    fused: f,
+                    kw_rank: pos(&kw_ranked, d),
+                    kw_score: kw_scores[du],
+                    sem_rank: pos(&sem_ids, d),
+                    best_cos: doc_scores
+                        .as_ref()
+                        .map(|ds| ds.best[du])
+                        .filter(|c| *c > f32::NEG_INFINITY),
+                    penalty: score::chunk_correction(chunks as usize, self.opts.chunk_penalty),
+                    chunks,
+                }
+            })
+            .collect();
+
+        SearchReport {
+            kw_words: words.iter().map(|w| Box::from(*w)).collect(),
+            terms: term_evidence,
+            unmatched,
+            avgdl: self.kw.avgdl,
+            kw_confidence,
+            kw_gated,
+            semantic,
+            docs,
+        }
+    }
     /// Whether the last search() actually used the vector side. False
     /// means keyword-only: all-OOV query, or rows not yet loaded.
     pub fn used_semantic(&self) -> bool {
