@@ -10,16 +10,13 @@
 //! commit later than in core. Only the RRF contribution arithmetic is
 //! still restated, because core discards scores after ranking.
 
-use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
+use crate::eval::ScoreArgs;
 use anyhow::{Context, Result};
+use chops_search_core::engine::{Engine, SemanticStatus};
 use chops_search_core::format::{Index, ModelMeta};
-use chops_search_core::keyword::keyword_words;
-use chops_search_core::rrf;
-use chops_search_core::score;
-use chops_search_core::store::RowStore;
 use chops_search_core::wordpiece::Vocab;
 
 /// List indexed documents with their URLs — what you need to write
@@ -38,184 +35,123 @@ pub fn list_docs(artifacts: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn explain(artifacts: &Path, query: &str, limit: usize, kw_floor: Option<f32>) -> Result<()> {
-    // ---- Load exactly what the browser would ---------------------------
+pub fn explain(artifacts: &Path, query: &str, limit: usize, args: ScoreArgs) -> Result<()> {
     let a = crate::artifacts::resolve(artifacts)?;
     let meta_bytes = fs::read(&a.meta).with_context(|| format!("{}", a.meta.display()))?;
     let index_bytes = fs::read(&a.index).with_context(|| format!("{}", a.index.display()))?;
     let rows_bytes = fs::read(&a.rows).with_context(|| format!("{}", a.rows.display()))?;
 
-    let meta = ModelMeta::read(&meta_bytes).context("parsing model.meta.bin")?;
-    let index = Index::read(&index_bytes).context("parsing index.bin")?;
-    let dim = meta.dim as usize;
-
-    let vocab = Vocab::from_tokens(&meta.tokens);
-    let mut store = RowStore::new(dim, meta.tokens.len(), meta.scales.clone());
-    store.ingest(0, &rows_bytes).context("ingesting rows")?;
+    let mut engine = Engine::new(&meta_bytes, &index_bytes).map_err(|e| anyhow::anyhow!("{e}"))?;
+    // The whole matrix: `query` explains a ranking, so it must never
+    // degrade to keyword-only the way a cold browser session can.
+    engine
+        .ingest(0, &rows_bytes)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let opts = args.apply(engine.score_opts());
+    engine.set_score_opts(opts);
 
     println!(
         "corpus:    {} docs, {} chunks, dim {}",
-        index.docs.len(),
-        index.chunk_doc.len(),
-        dim
+        engine.doc_count(),
+        engine.chunk_count(),
+        engine.dim()
     );
-
-    println!(
-        "scoring:   min_cos {:.2} (derived from dim {dim}), chunk_penalty {:.3}",
-        score::min_cos_for(dim),
-        score::CHUNK_PENALTY
-    );
-
-    // ---- Tokenization report (both pipelines) --------------------------
-    let norm = Vocab::normalize(query);
-    let words: Vec<&str> = keyword_words(&norm).into_iter().collect();
-    let ids = vocab.tokenize(query);
+    println!("scoring:   {}", ScoreArgs::describe(&opts));
     println!("query:     {query:?}");
-    println!("kw words:  {words:?}");
-    println!(
-        "wordpiece: {:?}",
-        ids.iter()
-            .map(|&i| meta.tokens[i as usize].as_str())
-            .collect::<Vec<_>>()
-    );
 
-    // ---- Keyword side, with scores (same formula as core::keyword) -----
-    let kw = index.keyword_index();
-    println!("kw:        avgdl={:.1}", kw.avgdl);
-    let terms = kw.resolve(&words, true);
-    let floor = kw_floor.unwrap_or(chops_search_core::score::KW_CONFIDENCE);
-    let kw_conf = kw.confidence(&words, &terms);
-    let kw_gated = kw_conf < floor;
+    // Vocab rebuilt only to SHOW the wordpiece split; the engine
+    // tokenizes with its own copy. Display, not arithmetic.
+    let meta = ModelMeta::read(&meta_bytes).context("parsing model.meta.bin")?;
+    let vocab = Vocab::from_tokens(&meta.tokens);
+    let pieces: Vec<&str> = vocab
+        .tokenize(query)
+        .iter()
+        .map(|&i| meta.tokens[i as usize].as_str())
+        .collect();
+
+    let report = engine.search_detailed(query);
+
+    println!("kw words:  {:?}", report.kw_words);
+    println!("wordpiece: {pieces:?}");
     println!(
         "kw:        avgdl={:.1}, confidence {:.2} (floor {:.2}){}",
-        kw.avgdl,
-        kw_conf,
-        floor,
-        if kw_gated {
+        report.avgdl,
+        report.kw_confidence,
+        opts.kw_confidence,
+        if report.kw_gated {
             " — keyword list SUPPRESSED"
         } else {
             ""
         }
     );
-    let mut kw_scores: HashMap<u16, f32> = HashMap::new();
-    for t in &terms {
-        let postings = &kw.terms[&t.text];
-        let idf = kw.idf(postings.len());
+    for t in &report.terms {
         println!(
-            "keyword:   {:?} df={} idf={idf:.3}{}",
-            t.text,
-            postings.len(),
+            "keyword:   {:?} df={} idf={:.3}{}",
+            t.term,
+            t.df,
+            t.idf,
             if t.expanded {
                 format!("  (prefix ×{})", t.weight)
             } else {
                 String::new()
             }
         );
-        for &(doc, tf) in postings {
-            *kw_scores.entry(doc).or_insert(0.0) += t.weight * kw.term_score(doc, tf, idf);
-        }
     }
-    for &w in &words {
-        if !terms.iter().any(|t| t.text.as_ref() == w) {
-            println!("keyword:   {w:?} matches no documents");
-        }
+    for w in &report.unmatched {
+        println!("keyword:   {w:?} matches no documents");
     }
-    let kw_ranked = if kw_gated {
-        Vec::new()
-    } else {
-        kw.rank_terms(&terms)
-    };
 
-    // ---- Semantic side, with per-doc best cosine + chunk counts --------
-    let mut best_cos = vec![f32::NEG_INFINITY; index.docs.len()];
-    let mut chunk_count = vec![0u32; index.docs.len()];
-    for &doc in &index.chunk_doc {
-        chunk_count[doc as usize] += 1;
-    }
-    let q = store.embed(&ids);
-    let sem_ranked: Vec<u16> = match &q {
-        None => {
-            println!("semantic:  unavailable (no in-vocabulary tokens)");
-            Vec::new()
-        }
-        Some(qv) => {
-            for (c, &doc) in index.chunk_doc.iter().enumerate() {
-                let row = &index.chunk_vecs[c * dim..(c + 1) * dim];
-                let mut acc = 0f32;
-                for (&qi, &vi) in qv.iter().zip(row) {
-                    acc += qi * vi as f32;
-                }
-                let s = acc * index.global_scale;
-                if s > best_cos[doc as usize] {
-                    best_cos[doc as usize] = s;
-                }
+    match report.semantic {
+        SemanticStatus::Unavailable => println!("semantic:  unavailable (no in-vocabulary tokens)"),
+        SemanticStatus::BelowFloor => println!(
+            "semantic:  nothing cleared the floor (top {:.3} < min_cos {:.2})",
+            report.top.unwrap_or(f32::NAN),
+            opts.min_cos
+        ),
+        SemanticStatus::Suppressed => println!(
+            "semantic:  SUPPRESSED — no keyword corroboration, gap {:.3} < min_gap {:.2}, \
+             top {:.3} < strong_cos {}",
+            report.gap.unwrap_or(f32::NAN),
+            opts.min_gap,
+            report.top.unwrap_or(f32::NAN),
+            if opts.strong_cos.is_finite() {
+                format!("{:.2}", opts.strong_cos)
+            } else {
+                "∞".into()
             }
-            score::rank_docs(
-                qv,
-                &index.chunk_vecs,
-                dim,
-                index.global_scale,
-                &index.chunk_doc,
-                index.docs.len(),
-                // Must match what Engine derives, or `query` reports a
-                // different set of documents passing the floor than
-                // `eval` and the browser actually use.
-                score::ScoreOpts {
-                    min_cos: score::min_cos_for(dim),
-                    ..Default::default()
-                },
-            )
-        }
-    };
+        ),
+        SemanticStatus::Ranked => {}
+    }
+    if let (Some(top), Some(gap)) = (report.top, report.gap) {
+        println!("sem:       top {top:.3}, top-median gap {gap:.3}");
+    }
 
-    // ---- Fuse and print, with contributions ----------------------------
-    let lists: Vec<&[u16]> = if sem_ranked.is_empty() {
-        vec![&kw_ranked]
-    } else {
-        vec![&kw_ranked, &sem_ranked]
-    };
-    let fused = rrf::fuse(&lists, rrf::K);
-
-    let rank_of = |list: &[u16], d: u16| list.iter().position(|&x| x == d);
     println!();
     println!(
         "{:<4} {:>8} {:>4} {:>9} {:>5} {:>9} {:>8} {:>7}  title",
         "doc", "fused", "kw#", "kw-score", "sem#", "best-cos", "penalty", "chunks"
     );
-    for &d in fused.iter().take(limit) {
-        let kwr = rank_of(&kw_ranked, d);
-        let smr = rank_of(&sem_ranked, d);
-        let fused_score = kwr.map_or(0.0, |r| 1.0 / (rrf::K + (r + 1) as f32))
-            + smr.map_or(0.0, |r| 1.0 / (rrf::K + (r + 1) as f32));
-        let opt_rank = |r: Option<usize>| r.map_or_else(|| "-".into(), |r| (r + 1).to_string());
-
-        let n_chunks = chunk_count[d as usize] as usize;
-        let raw = best_cos[d as usize];
-        let (cos_s, pen_s) = if raw > f32::NEG_INFINITY {
-            let p = score::chunk_correction(n_chunks, score::CHUNK_PENALTY);
-            let pen = if p > 0.0 {
-                format!("-{p:.3}")
-            } else {
-                "0".to_string()
-            };
-            (format!("{raw:.3}"), pen)
-        } else {
-            ("-".to_string(), "-".to_string())
-        };
-
+    let rank = |r: Option<u16>| r.map_or_else(|| "-".to_string(), |r| (r + 1).to_string());
+    for d in report.docs.iter().take(limit) {
         println!(
             "{:<4} {:>8.5} {:>4} {:>9} {:>5} {:>9} {:>8} {:>7}  {}",
-            d,
-            fused_score,
-            opt_rank(kwr),
-            kw_scores
-                .get(&d)
-                .map_or_else(|| "-".into(), |s| format!("{s:.3}")),
-            opt_rank(smr),
-            cos_s,
-            pen_s,
-            n_chunks,
-            index.docs[d as usize].title,
+            d.doc,
+            d.fused,
+            rank(d.kw_rank),
+            if d.kw_score > 0.0 {
+                format!("{:.3}", d.kw_score)
+            } else {
+                "-".into()
+            },
+            rank(d.sem_rank),
+            d.best_cos.map_or("-".into(), |c| format!("{c:.3}")),
+            if d.penalty > 0.0 {
+                format!("-{:.3}", d.penalty)
+            } else {
+                "0".into()
+            },
+            d.chunks,
+            engine.doc_title(d.doc).unwrap_or("<missing>"),
         );
     }
     Ok(())

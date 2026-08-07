@@ -236,6 +236,21 @@ almost always visible in the chunk count or the term frequencies.")]
         /// keyword list is suppressed from fusion. 0 disables.
         #[arg(long, value_name = "FRACTION")]
         kw_floor: Option<f32>,
+        /// Minimum top-median cosine contrast for an uncorroborated
+        /// semantic list. Default 0 (disabled).
+        ///
+        /// The corroboration gate: when the keyword side contributed
+        /// nothing and no document stands out from the corpus, the
+        /// ranking is noise rather than an answer.
+        #[arg(long, value_name = "GAP")]
+        min_gap: Option<f32>,
+        /// Best-chunk cosine at or above which the gate never fires.
+        /// Default off.
+        ///
+        /// Escape hatch for broad-but-real queries. Disables at
+        /// infinity, not at 0 — 0 would disable the gate, not the hatch.
+        #[arg(long, value_name = "COS")]
+        strong_cos: Option<f32>,
     },
 
     /// Score the engine against a labelled query set.
@@ -287,6 +302,22 @@ the real ones.")]
         /// max-pooled score; this corrects the bias. 0 disables it.
         #[arg(long, value_name = "COEFF")]
         chunk_penalty: Option<f32>,
+        /// Minimum top-median cosine contrast for an uncorroborated
+        /// semantic list. Default 0 (disabled).
+        ///
+        /// The corroboration gate: when the keyword side contributed
+        /// nothing and no document stands out from the corpus, the
+        /// ranking is noise rather than an answer.
+        #[arg(long, value_name = "GAP")]
+        min_gap: Option<f32>,
+        /// Best-chunk cosine at or above which the gate never fires.
+        /// Default off.
+        ///
+        /// Escape hatch for broad-but-real queries: a flat field whose
+        /// best document is strongly relevant is not noise. Disables at
+        /// infinity, not at 0 — 0 would disable the gate, not the hatch.
+        #[arg(long, value_name = "COS")]
+        strong_cos: Option<f32>,
     },
 
     /// Emit a shell completion script.
@@ -353,10 +384,18 @@ fn main() -> Result<()> {
             limit,
             query,
             kw_floor,
+            min_gap,
+            strong_cos,
         } => {
             let cfg = load_config(&site)?;
             let dir = artifacts.unwrap_or(cfg.out);
-            chops_search::explain::explain(&dir, &query, limit, kw_floor)
+            let args = chops_search::eval::ScoreArgs {
+                kw_floor,
+                min_gap,
+                strong_cos,
+                ..Default::default()
+            };
+            chops_search::explain::explain(&dir, &query, limit, args)
         }
         Cmd::Eval {
             artifacts,
