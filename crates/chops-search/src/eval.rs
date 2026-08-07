@@ -19,6 +19,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use chops_search_core::engine::Engine;
+use chops_search_core::score::ScoreOpts;
 
 struct Case {
     q: String,
@@ -32,15 +33,66 @@ struct Tally {
     hit1: usize,
     hit3: usize,
 }
+/// Scoring overrides from the command line. `None` means "whatever the
+/// engine derived" — min_cos scales with dimensionality, so starting
+/// from ScoreOpts::default() would reset the floor to its 256-dim value
+/// on a run that overrides only one other field.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ScoreArgs {
+    pub min_cos: Option<f32>,
+    pub chunk_penalty: Option<f32>,
+    pub kw_floor: Option<f32>,
+    pub min_gap: Option<f32>,
+    pub strong_cos: Option<f32>,
+}
+
+impl ScoreArgs {
+    /// Apply to a base — always `engine.score_opts()`, never `default()`.
+    pub fn apply(&self, mut o: ScoreOpts) -> ScoreOpts {
+        if let Some(v) = self.min_cos {
+            o.min_cos = v;
+        }
+        if let Some(v) = self.chunk_penalty {
+            o.chunk_penalty = v;
+        }
+        if let Some(v) = self.kw_floor {
+            o.kw_confidence = v;
+        }
+        if let Some(v) = self.min_gap {
+            o.min_gap = v;
+        }
+        if let Some(v) = self.strong_cos {
+            o.strong_cos = v;
+        }
+        o
+    }
+
+    /// The `scoring:` header. Shared so `eval` and `query` can't report
+    /// different thresholds for the same flags. strong_cos prints "off"
+    /// at infinity rather than `inf`: it disables at infinity while every
+    /// other knob disables at zero.
+    pub fn describe(o: &ScoreOpts) -> String {
+        format!(
+            "min_cos {:.2}, chunk_penalty {:.3}, kw_floor {:.2}, min_gap {:.2}, strong_cos {}",
+            o.min_cos,
+            o.chunk_penalty,
+            o.kw_confidence,
+            o.min_gap,
+            if o.strong_cos.is_finite() {
+                format!("{:.2}", o.strong_cos)
+            } else {
+                "off".into()
+            }
+        )
+    }
+}
 
 pub fn eval(
     artifacts: &Path,
     queries: &Path,
     kind_filter: Option<&str>,
     fail_under: f32,
-    min_cos: Option<f32>,
-    chunk_penalty: Option<f32>,
-    kw_floor: Option<f32>,
+    args: ScoreArgs,
 ) -> Result<()> {
     let cases = load_cases(queries, kind_filter)?;
     if cases.is_empty() {
@@ -60,19 +112,33 @@ pub fn eval(
     // index uses. Starting from Default would silently reset the floor to
     // its 256-dim value on any run that passes only --chunk-penalty.
     let mut opts = engine.score_opts();
-    if let Some(v) = min_cos {
+    if let Some(v) = args.min_cos {
         opts.min_cos = v;
     }
-    if let Some(v) = chunk_penalty {
+    if let Some(v) = args.chunk_penalty {
         opts.chunk_penalty = v;
     }
-    if let Some(v) = kw_floor {
+    if let Some(v) = args.kw_floor {
         opts.kw_confidence = v;
+    }
+    if let Some(v) = args.min_gap {
+        opts.min_gap = v;
+    }
+    if let Some(v) = args.strong_cos {
+        opts.strong_cos = v;
     }
     engine.set_score_opts(opts);
     println!(
-        "scoring:   min_cos {:.2}, chunk_penalty {:.3}, kw_floor {:.2}",
-        opts.min_cos, opts.chunk_penalty, opts.kw_confidence
+        "scoring:   min_cos {:.2}, chunk_penalty {:.3}, kw_floor {:.2}, min_gap {:.2}, strong_cos {}",
+        opts.min_cos,
+        opts.chunk_penalty,
+        opts.kw_confidence,
+        opts.min_gap,
+        if opts.strong_cos.is_finite() {
+            format!("{:.2}", opts.strong_cos)
+        } else {
+            "off".to_string()
+        }
     );
     engine
         .ingest(0, &prefix_bytes)

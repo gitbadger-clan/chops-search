@@ -366,19 +366,20 @@ fn main() -> Result<()> {
             min_cos,
             chunk_penalty,
             kw_floor,
+            min_gap,
+            strong_cos,
         } => {
             let cfg = load_config(&site)?;
             let dir = artifacts.unwrap_or_else(|| cfg.out.clone());
             let queries = queries.unwrap_or_else(|| cfg.root.join("fixtures/queries.toml"));
-            chops_search::eval::eval(
-                &dir,
-                &queries,
-                kind.as_deref(),
-                fail_under,
+            let args = chops_search::eval::ScoreArgs {
                 min_cos,
                 chunk_penalty,
                 kw_floor,
-            )
+                min_gap,
+                strong_cos,
+            };
+            chops_search::eval::eval(&dir, &queries, kind.as_deref(), fail_under, args)
         }
         Cmd::Model { action } => {
             let cfg = load_config(&site)?;
