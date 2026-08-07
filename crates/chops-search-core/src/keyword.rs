@@ -235,26 +235,45 @@ impl KeywordIndex {
         self.rank_terms(&self.resolve(query_words, false))
     }
 
-    /// Score and order documents for already-resolved terms.
-    pub fn rank_terms(&self, terms: &[Term]) -> Vec<u16> {
-        let mut scores: HashMap<u16, f32> = HashMap::new();
+    /// Per-document scores for resolved terms, densely indexed by doc id.
+    /// Dense rather than a HashMap for two reasons: f32 summation order
+    /// over HashMap iteration is not deterministic, and native and wasm
+    /// must rank identically; and the report needs the scores after
+    /// ranking, which rank_terms used to throw away.
+    pub fn score_terms(&self, terms: &[Term]) -> Vec<f32> {
+        let mut scores = vec![0f32; self.n_docs as usize];
         for t in terms {
             let Some(postings) = self.terms.get(&t.text) else {
                 continue;
             };
             let idf = self.idf(postings.len());
             for &(doc, tf) in postings {
-                *scores.entry(doc).or_insert(0.0) += t.weight * self.term_score(doc, tf, idf);
+                if let Some(s) = scores.get_mut(doc as usize) {
+                    *s += t.weight * self.term_score(doc, tf, idf);
+                }
             }
         }
-        let mut out: Vec<u16> = scores.keys().copied().collect();
+        scores
+    }
+
+    /// Order docs by score descending, ties on doc id. Docs with no
+    /// evidence (score 0) are excluded, matching the old HashMap behavior
+    /// where they never entered the map.
+    pub fn rank_from_scores(scores: &[f32]) -> Vec<u16> {
+        let mut out: Vec<u16> = (0..scores.len() as u16)
+            .filter(|&d| scores[d as usize] > 0.0)
+            .collect();
         out.sort_unstable_by(|&a, &b| {
-            scores[&b]
-                .partial_cmp(&scores[&a])
+            scores[b as usize]
+                .partial_cmp(&scores[a as usize])
                 .unwrap_or(core::cmp::Ordering::Equal)
                 .then(a.cmp(&b))
         });
         out
+    }
+
+    pub fn rank_terms(&self, terms: &[Term]) -> Vec<u16> {
+        Self::rank_from_scores(&self.score_terms(terms))
     }
 }
 
