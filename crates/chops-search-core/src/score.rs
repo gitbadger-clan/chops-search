@@ -227,46 +227,10 @@ pub fn rank_docs_detailed(
     n_docs: usize,
     opts: ScoreOpts,
 ) -> Vec<Ranked> {
-    debug_assert_eq!(q.len(), dim);
-    debug_assert_eq!(chunk_vecs.len(), chunk_doc.len() * dim);
-
-    let mut best = vec![f32::NEG_INFINITY; n_docs];
-    let mut best_chunk = vec![u32::MAX; n_docs];
-    let mut counts = vec![0usize; n_docs];
-    for (c, &doc) in chunk_doc.iter().enumerate() {
-        let d = doc as usize;
-        if d >= n_docs {
-            continue;
-        }
-        let row = &chunk_vecs[c * dim..(c + 1) * dim];
-        let mut acc = 0f32;
-        for (&qi, &vi) in q.iter().zip(row) {
-            acc += qi * vi as f32;
-        }
-        let s = acc * global_scale;
-        counts[d] += 1;
-        if s > best[d] {
-            best[d] = s;
-            best_chunk[d] = c as u32;
-        }
-    }
-
-    // Floor on RAW similarity, rank on ADJUSTED.
-    let mut out: Vec<Ranked> = (0..n_docs)
-        .filter(|&d| best[d] > f32::NEG_INFINITY && best[d] >= opts.min_cos)
-        .map(|d| Ranked {
-            doc: d as u16,
-            chunk: best_chunk[d],
-            score: best[d] - chunk_correction(counts[d], opts.chunk_penalty),
-        })
-        .collect();
-    out.sort_unstable_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(core::cmp::Ordering::Equal)
-            .then(a.doc.cmp(&b.doc))
-    });
-    out
+    rank_scored(
+        &score_docs(q, chunk_vecs, dim, global_scale, chunk_doc, n_docs),
+        opts,
+    )
 }
 
 #[cfg(test)]
