@@ -53,11 +53,14 @@ pub struct TermEvidence {
 }
 
 /// What the semantic side did for this query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SemanticStatus {
-    /// embed() returned nothing: all-OOV query, or rows not yet loaded.
     Unavailable,
-    /// Embedded fine; nothing cleared the relevance floor.
     BelowFloor,
+    /// Embedded fine, but the corroboration gate suppressed the list: no
+    /// keyword evidence, top − median below min_gap, and no top strong
+    /// enough to clear strong_cos.
+    Suppressed,
     Ranked,
 }
 
@@ -94,6 +97,10 @@ pub struct SearchReport {
     pub semantic: SemanticStatus,
     /// Fused order, untruncated — callers apply their own limit.
     pub docs: Vec<DocEvidence>,
+    pub gap: Option<f32>,
+    /// Best raw cosine across the field; None when the query never
+    /// embedded. The number the strong_cos hatch judged.
+    pub top: Option<f32>,
 }
 
 impl SearchReport {
@@ -245,8 +252,8 @@ impl Engine {
             .collect();
 
         let ids = self.vocab.tokenize(query);
-        let (semantic, doc_scores, sem_ranked) = match self.store.embed(&ids) {
-            None => (SemanticStatus::Unavailable, None, Vec::new()),
+        let (semantic, doc_scores, sem_ranked, gap, top) = match self.store.embed(&ids) {
+            None => (SemanticStatus::Unavailable, None, Vec::new(), None, None),
             Some(q) => {
                 let ds = score::score_docs(
                     &q,
@@ -256,13 +263,31 @@ impl Engine {
                     &self.index.chunk_doc,
                     self.index.docs.len(),
                 );
-                let ranked = score::rank_scored(&ds, self.opts);
-                let status = if ranked.is_empty() {
+                let gap = score::top_median_gap(&ds.best);
+                let top = ds.best.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                // Corroboration gate: no keyword evidence, nothing standing out from
+                // the pack, and no clearly-relevant top. That combination is the noise
+                // signature on a homogeneous corpus. A flat field whose best doc is
+                // strongly relevant is a broad-but-real query, not noise, so strong_cos
+                // exempts it. Only the semantic list is suppressed; kw_ranked is
+                // already empty.
+                let gated = kw_ranked.is_empty()
+                    && self.opts.min_gap > 0.0
+                    && gap < self.opts.min_gap
+                    && top < self.opts.strong_cos;
+                let ranked = if gated {
+                    Vec::new()
+                } else {
+                    score::rank_scored(&ds, self.opts)
+                };
+                let status = if gated {
+                    SemanticStatus::Suppressed
+                } else if ranked.is_empty() {
                     SemanticStatus::BelowFloor
                 } else {
                     SemanticStatus::Ranked
                 };
-                (status, Some(ds), ranked)
+                (status, Some(ds), ranked, Some(gap), Some(top))
             }
         };
 
@@ -311,6 +336,8 @@ impl Engine {
             kw_gated,
             semantic,
             docs,
+            gap,
+            top,
         }
     }
     /// Whether the last search() actually used the vector side. False

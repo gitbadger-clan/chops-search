@@ -65,6 +65,8 @@ pub struct ScoreOpts {
     pub min_cos: f32,
     pub chunk_penalty: f32,
     pub kw_confidence: f32,
+    pub min_gap: f32,
+    pub strong_cos: f32,
 }
 
 /// A ranked document plus the chunk that earned it its score — the chunk
@@ -94,6 +96,8 @@ impl Default for ScoreOpts {
             min_cos: MIN_COS,
             chunk_penalty: CHUNK_PENALTY,
             kw_confidence: KW_CONFIDENCE,
+            min_gap: 0.0,
+            strong_cos: f32::INFINITY,
         }
     }
 }
@@ -106,10 +110,24 @@ impl ScoreOpts {
             min_cos: f32::NEG_INFINITY,
             chunk_penalty: 0.0,
             kw_confidence: 0.0,
+            min_gap: 0.0,
+            strong_cos: f32::INFINITY,
         }
     }
 }
-
+/// Contrast of the best raw cosine against the corpus pack.
+/// Homogeneous noise is flat (small gap); a real match stands out.
+/// Computed on RAW best-cos, pre-floor and pre-chunk-penalty: the gap
+/// asks "does anything stand out from the whole corpus", so filtering
+/// or penalizing before measuring would distort the statistic.
+pub fn top_median_gap(best_cos: &[f32]) -> f32 {
+    let mut v: Vec<f32> = best_cos.iter().copied().filter(|c| c.is_finite()).collect();
+    if v.len() < 2 {
+        return f32::INFINITY; // one doc can't be "flat"; never gate
+    }
+    v.sort_unstable_by(|a, b| a.total_cmp(b));
+    v[v.len() - 1] - v[v.len() / 2]
+}
 /// Expected-maximum correction for a document with `n` chunks.
 /// Zero for n ≤ 1; grows slowly (n=4 → 1.66·coeff, n=32 → 2.63·coeff).
 pub fn chunk_correction(n: usize, coeff: f32) -> f32 {
@@ -264,8 +282,7 @@ mod tests {
         let chunks: Vec<i8> = vec![45, 4];
         let opts = ScoreOpts {
             min_cos: 0.20,
-            chunk_penalty: 0.0,
-            kw_confidence: 0.0,
+            ..Default::default()
         };
         let ranked = rank_docs(&q, &chunks, 1, 0.01, &[0, 1], 2, opts);
         assert_eq!(ranked, vec![0], "0.04 should be below the floor");
@@ -277,8 +294,7 @@ mod tests {
         let chunks: Vec<i8> = vec![4, 2];
         let opts = ScoreOpts {
             min_cos: 0.20,
-            chunk_penalty: 0.0,
-            kw_confidence: 0.0,
+            ..Default::default()
         };
         assert!(rank_docs(&q, &chunks, 1, 0.01, &[0, 1], 2, opts).is_empty());
     }
@@ -381,10 +397,35 @@ mod tests {
         assert_eq!(ds.counts, vec![1, 1]);
         let opts = ScoreOpts {
             min_cos: 0.20,
-            chunk_penalty: 0.0,
-            kw_confidence: 0.0,
+            ..Default::default()
         };
         assert_eq!(rank_scored(&ds, opts).len(), 1);
         assert_eq!(rank_scored(&ds, opts)[0].doc, 0);
+    }
+
+    #[test]
+    fn gap_ignores_chunkless_docs() {
+        // NEG_INFINITY entries (docs without chunks) are not part of the pack.
+        let gap = top_median_gap(&[0.40, 0.10, 0.12, f32::NEG_INFINITY]);
+        assert!((gap - 0.28).abs() < 1e-6); // median of {0.10,0.12,0.40} is 0.12
+    }
+
+    #[test]
+    fn gap_is_measured_pre_floor() {
+        // A floor that rejects every doc must not change the gap: the gap
+        // reads the measurement (score_docs), never the judgment (rank_scored).
+        let q = [1.0f32];
+        let chunks: Vec<i8> = vec![40, 10, 12];
+        let ds = score_docs(&q, &chunks, 1, 0.01, &[0, 1, 2], 3);
+        let gap = top_median_gap(&ds.best);
+        assert!((gap - 0.28).abs() < 1e-6); // 0.40 − median 0.12
+
+        // Sanity: a high floor empties the ranking while the gap stands.
+        let opts = ScoreOpts {
+            min_cos: 0.9,
+            ..Default::default()
+        };
+        assert!(rank_scored(&ds, opts).is_empty());
+        assert!((top_median_gap(&ds.best) - 0.28).abs() < 1e-6);
     }
 }
