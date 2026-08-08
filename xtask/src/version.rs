@@ -90,7 +90,7 @@ pub fn version(root: &Path, arg: Option<&str>) -> Result<()> {
         "\nnext:\n  \
          git commit -am \"release {next}\"\n  \
          git tag v{next}\n  \
-         git push && git push --tags"
+         git push origin main && git push origin --tags"
     );
     Ok(())
 }
