@@ -34,10 +34,24 @@ model   = ".chops-search/model"
 # changing it — dimensionality reduction is real information loss.
 dims = 128
 
-# Term-frequency weights. Tags are the author's own statement of what a
-# page is about, so they outweigh the title, which outweighs body text.
+# BM25F field weights: what a length-normalised occurrence in each field
+# is worth against one in the body. Each field's term frequency is divided
+# by that field's OWN average length before these apply, and saturation
+# happens once on the combined value, so a weight biases without
+# inflating. The useful range is therefore much smaller than a plain
+# multiplier's would be. 0 ignores a field entirely.
+#
+# Tags are the author's own statement of what a page is about, so they
+# outweigh the title, which outweighs body text. `description` sits at
+# parity with body: it is indexed because it is written in the register
+# searchers phrase questions in, but it measured no better weighted up.
+#
+# These are query-time knobs, so sweep them against a built index rather
+# than guessing: `chops-search eval --w-title 1 --w-desc 0` needs no
+# rebuild. Only the value committed here reaches the browser.
 # title_weight = 2
 # tag_weight   = 4
+# desc_weight  = 1
 
 # chunk_chars = 600
 # prefix_rows = 2048
@@ -215,6 +229,42 @@ mod tests {
                 .unwrap()
                 .contains("/static/search/")
         );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn scaffolded_config_is_loadable_and_matches_the_defaults() {
+        // The template is commented-out config, which is exactly the kind
+        // of text that rots: it described pre-multiplied tf weights for a
+        // while after BM25F landed. Parsing it uncommented proves every
+        // key is real, spelled right, and set to the value the binary
+        // would have used anyway.
+        let root = tmp("template");
+        init(&root, false).unwrap();
+        let path = root.join("chops-search.toml");
+        let raw = fs::read_to_string(&path).unwrap();
+        let uncommented: String = raw
+            .lines()
+            .map(|l| {
+                let t = l.trim_start();
+                match t.strip_prefix("# ") {
+                    // Only revive lines that look like `key = value`;
+                    // prose comments stay comments.
+                    Some(rest) if rest.contains(" = ") => rest.to_string(),
+                    _ => l.to_string(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&path, &uncommented).unwrap();
+
+        let cfg = crate::config::Config::load(&path).unwrap();
+        assert_eq!(cfg.title_weight, chops_search_core::keyword::W_TITLE);
+        assert_eq!(cfg.tag_weight, chops_search_core::keyword::W_TAG);
+        assert_eq!(cfg.desc_weight, chops_search_core::keyword::W_DESC);
+        assert_eq!(cfg.chunk_chars, 600);
+        assert_eq!(cfg.prefix_rows, 2048);
+        assert_eq!(cfg.dims, Some(128));
         fs::remove_dir_all(&root).ok();
     }
 
