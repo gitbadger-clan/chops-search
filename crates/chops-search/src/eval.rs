@@ -34,9 +34,11 @@ struct Tally {
     hit3: usize,
 }
 /// Scoring overrides from the command line. `None` means "whatever the
-/// engine derived" — min_cos scales with dimensionality, so starting
-/// from ScoreOpts::default() would reset the floor to its 256-dim value
-/// on a run that overrides only one other field.
+/// engine derived from the artifacts" — min_cos scales with
+/// dimensionality and the field weights are read out of index.bin, so
+/// starting from ScoreOpts::default() would reset the floor to its
+/// 256-dim value and the weights to the compiled-in defaults on a run
+/// that overrides only one other field.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ScoreArgs {
     pub min_cos: Option<f32>,
@@ -44,6 +46,8 @@ pub struct ScoreArgs {
     pub kw_floor: Option<f32>,
     pub min_gap: Option<f32>,
     pub strong_cos: Option<f32>,
+    pub w_title: Option<f32>,
+    pub w_tag: Option<f32>,
 }
 
 impl ScoreArgs {
@@ -64,19 +68,31 @@ impl ScoreArgs {
         if let Some(v) = self.strong_cos {
             o.strong_cos = v;
         }
+        if let Some(v) = self.w_title {
+            o.w_title = v;
+        }
+        if let Some(v) = self.w_tag {
+            o.w_tag = v;
+        }
         o
     }
 
     /// The `scoring:` header. Shared so `eval` and `query` can't report
-    /// different thresholds for the same flags. strong_cos prints "off"
-    /// at infinity rather than `inf`: it disables at infinity while every
-    /// other knob disables at zero.
+    /// different thresholds for the same flags — they diverged once,
+    /// when this existed and `eval` printed its own copy anyway.
+    ///
+    /// Keyword knobs first, then the semantic ones. strong_cos prints
+    /// "off" at infinity rather than `inf`: it disables at infinity while
+    /// every other knob disables at zero.
     pub fn describe(o: &ScoreOpts) -> String {
         format!(
-            "min_cos {:.2}, chunk_penalty {:.3}, kw_floor {:.2}, min_gap {:.2}, strong_cos {}",
+            "kw_floor {:.2}, w_title {:.2}, w_tag {:.2}, \
+             min_cos {:.2}, chunk_penalty {:.3}, min_gap {:.2}, strong_cos {}",
+            o.kw_confidence,
+            o.w_title,
+            o.w_tag,
             o.min_cos,
             o.chunk_penalty,
-            o.kw_confidence,
             o.min_gap,
             if o.strong_cos.is_finite() {
                 format!("{:.2}", o.strong_cos)
@@ -108,38 +124,14 @@ pub fn eval(
 
     let mut engine = Engine::new(&meta_bytes, &index_bytes).map_err(|e| anyhow::anyhow!("{e}"))?;
     // Start from what the engine derived, not from Default: min_cos
-    // scales with dimensionality, and Default has no idea what dim this
-    // index uses. Starting from Default would silently reset the floor to
-    // its 256-dim value on any run that passes only --chunk-penalty.
-    let mut opts = engine.score_opts();
-    if let Some(v) = args.min_cos {
-        opts.min_cos = v;
-    }
-    if let Some(v) = args.chunk_penalty {
-        opts.chunk_penalty = v;
-    }
-    if let Some(v) = args.kw_floor {
-        opts.kw_confidence = v;
-    }
-    if let Some(v) = args.min_gap {
-        opts.min_gap = v;
-    }
-    if let Some(v) = args.strong_cos {
-        opts.strong_cos = v;
-    }
+    // scales with dimensionality and the BM25F weights come from
+    // index.bin, neither of which Default knows. Starting from Default
+    // would silently reset the floor to its 256-dim value and the
+    // weights to the compiled-in constants on any run that passes only
+    // --chunk-penalty.
+    let opts = args.apply(engine.score_opts());
     engine.set_score_opts(opts);
-    println!(
-        "scoring:   min_cos {:.2}, chunk_penalty {:.3}, kw_floor {:.2}, min_gap {:.2}, strong_cos {}",
-        opts.min_cos,
-        opts.chunk_penalty,
-        opts.kw_confidence,
-        opts.min_gap,
-        if opts.strong_cos.is_finite() {
-            format!("{:.2}", opts.strong_cos)
-        } else {
-            "off".to_string()
-        }
-    );
+    println!("scoring:   {}", ScoreArgs::describe(&opts));
     engine
         .ingest(0, &prefix_bytes)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -377,4 +369,78 @@ fn load_cases(path: &Path, kind_filter: Option<&str>) -> Result<Vec<Case>> {
         out.push(Case { q, expect, kind });
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A base that resembles what an engine hands over: nothing at its
+    /// compiled-in default, so any field apply() forgets shows up.
+    fn base() -> ScoreOpts {
+        ScoreOpts {
+            min_cos: 0.34,
+            chunk_penalty: 0.05,
+            kw_confidence: 0.25,
+            min_gap: 0.11,
+            strong_cos: 0.55,
+            w_title: 3.0,
+            w_tag: 7.0,
+        }
+    }
+
+    #[test]
+    fn no_flags_is_the_identity() {
+        // The whole reason apply() takes a base: a run with no scoring
+        // flags must score exactly as the artifacts say, not as the
+        // compiled-in defaults say.
+        let o = ScoreArgs::default().apply(base());
+        let b = base();
+        assert_eq!(o.min_cos, b.min_cos);
+        assert_eq!(o.chunk_penalty, b.chunk_penalty);
+        assert_eq!(o.kw_confidence, b.kw_confidence);
+        assert_eq!(o.min_gap, b.min_gap);
+        assert_eq!(o.strong_cos, b.strong_cos);
+        assert_eq!(o.w_title, b.w_title);
+        assert_eq!(o.w_tag, b.w_tag);
+    }
+
+    #[test]
+    fn one_flag_leaves_the_rest_alone() {
+        let args = ScoreArgs {
+            w_title: Some(0.0),
+            ..Default::default()
+        };
+        let o = args.apply(base());
+        assert_eq!(o.w_title, 0.0, "zero is a real sweep point, not unset");
+        assert_eq!(o.w_tag, 7.0);
+        assert_eq!(o.min_cos, 0.34, "the index-derived floor must survive");
+    }
+
+    #[test]
+    fn describe_reports_every_knob() {
+        let s = ScoreArgs::describe(&base());
+        for knob in [
+            "kw_floor",
+            "w_title",
+            "w_tag",
+            "min_cos",
+            "chunk_penalty",
+            "min_gap",
+            "strong_cos",
+        ] {
+            assert!(s.contains(knob), "{knob} missing from {s:?}");
+        }
+    }
+
+    #[test]
+    fn describe_prints_an_infinite_strong_cos_as_off() {
+        let opts = ScoreOpts {
+            strong_cos: f32::INFINITY,
+            ..base()
+        };
+        let s = ScoreArgs::describe(&opts);
+        assert!(s.contains("strong_cos off"), "{s}");
+        assert!(!s.contains("inf"), "{s}");
+    }
 }

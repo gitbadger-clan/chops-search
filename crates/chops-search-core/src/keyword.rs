@@ -1,4 +1,4 @@
-//! Minimal keyword engine: BM25 over whole documents, with prefix
+//! Minimal keyword engine: BM25F over title/tag/body fields, with prefix
 //! expansion on the term the user is still typing.
 //!
 //! This is the exact-token half of the hybrid — the one that nails `pydub`
@@ -12,6 +12,16 @@
 //! observed live, where a 9 KB post took kw#1 for "losing tasks when the
 //! server dies" on the strength of its tf for "when" and "the", beating
 //! the 300-byte page actually titled "Where Do the Tasks Go?".
+//!
+//! BM25F rather than pre-multiplied field weights: the old scheme counted
+//! a title mention as N body mentions BEFORE saturation, so a weighted
+//! title tf blew straight past k1 and a title term behaved like keyword
+//! stuffing. BM25F keeps the fields separate: each field's tf is
+//! normalized by that field's OWN length (a term in a 5-word title scores
+//! like a term in a 5-word field, not averaged against 2,000 words of
+//! body), the normalized tfs are combined with the field weights, and
+//! saturation applies ONCE to the combined value. Weights bias, they no
+//! longer inflate.
 //!
 //! PREFIX EXPANSION. In an as-you-type box, a query is a complete phrase
 //! plus one half-typed word. Scoring that last word exactly means
@@ -36,12 +46,23 @@
 //! bias — a term matches wherever it appears in the post. That windowing
 //! is precisely the bug that hid `pydub` at char 3,700 for years.
 
+use crate::format::Posting;
 use std::collections::HashMap;
 
 /// Standard BM25 parameters. k1 caps term-frequency saturation; b sets
 /// how hard document length bites (0 = none, 1 = full).
 pub const K1: f32 = 1.2;
 pub const B: f32 = 0.75;
+
+/// Default BM25F field weights: what a length-normalized title/tag
+/// occurrence is worth relative to a body occurrence (body is fixed at
+/// 1.0 — weights are relative, so two knobs, not three). Applied AFTER
+/// per-field normalization and BEFORE saturation. These mirror the old
+/// config defaults in intent, but they are not the same quantity as the
+/// pre-multiplied tf weights they replace — sweep with
+/// `chops-search eval --w-title/--w-tag` before trusting them.
+pub const W_TITLE: f32 = 2.0;
+pub const W_TAG: f32 = 4.0;
 
 /// Shortest trailing word that may expand. Two characters already matches
 /// far too much of an English vocabulary to be informative.
@@ -53,18 +74,25 @@ pub const PREFIX_DAMP: f32 = 0.5;
 
 pub struct KeywordIndex {
     pub n_docs: u16,
-    /// term → postings (doc id, term frequency), doc ids ascending.
-    pub terms: HashMap<Box<str>, Vec<(u16, u16)>>,
+    /// term → postings with per-field tfs, doc ids ascending.
+    pub terms: HashMap<Box<str>, Vec<Posting>>,
     /// Terms in sorted order, so a prefix range is a binary search. Built
     /// here rather than serialized: index.bin already stores them sorted,
     /// but the engine reads them into a map, and re-sorting once at load
     /// is cheaper than a second copy in the artifact.
     pub sorted: Vec<Box<str>>,
-    /// Weighted length per doc (Σ tf over all terms), derived at
-    /// construction — never serialized.
-    pub dl: Vec<f32>,
-    /// Mean of dl, floored at 1 so the ratio is always defined.
-    pub avgdl: f32,
+    /// Per-field lengths, derived at construction — never serialized.
+    /// BM25F normalizes each field by its OWN length, which is the whole
+    /// reason the postings carry three tfs.
+    pub dl_title: Vec<f32>,
+    pub dl_tag: Vec<f32>,
+    pub dl_body: Vec<f32>,
+    /// Means, floored at 1 so every ratio is defined. Tags are commonly
+    /// absent on a whole corpus, so this floor is load-bearing, not
+    /// defensive.
+    pub avg_title: f32,
+    pub avg_tag: f32,
+    pub avg_body: f32,
 }
 
 /// One scored query term, after prefix expansion has been resolved.
@@ -79,28 +107,44 @@ pub struct Term {
 }
 
 impl KeywordIndex {
-    pub fn new(n_docs: u16, terms: HashMap<Box<str>, Vec<(u16, u16)>>) -> Self {
-        let mut dl = vec![0f32; n_docs as usize];
+    pub fn new(n_docs: u16, terms: HashMap<Box<str>, Vec<Posting>>) -> Self {
+        let n = n_docs as usize;
+        let mut dl_title = vec![0f32; n];
+        let mut dl_tag = vec![0f32; n];
+        let mut dl_body = vec![0f32; n];
         for postings in terms.values() {
-            for &(doc, tf) in postings {
-                if let Some(d) = dl.get_mut(doc as usize) {
-                    *d += tf as f32;
+            for p in postings {
+                let d = p.doc as usize;
+                if d >= n {
+                    continue;
                 }
+                dl_title[d] += p.title as f32;
+                dl_tag[d] += p.tag as f32;
+                dl_body[d] += p.body as f32;
             }
         }
-        let avgdl = if n_docs == 0 {
-            1.0
-        } else {
-            (dl.iter().sum::<f32>() / n_docs as f32).max(1.0)
+        let avg = |dl: &[f32]| {
+            if n == 0 {
+                1.0
+            } else {
+                (dl.iter().sum::<f32>() / n as f32).max(1.0)
+            }
         };
+        let avg_title = avg(&dl_title);
+        let avg_tag = avg(&dl_tag);
+        let avg_body = avg(&dl_body);
         let mut sorted: Vec<Box<str>> = terms.keys().cloned().collect();
         sorted.sort_unstable();
         KeywordIndex {
             n_docs,
             terms,
             sorted,
-            dl,
-            avgdl,
+            dl_title,
+            dl_tag,
+            dl_body,
+            avg_title,
+            avg_tag,
+            avg_body,
         }
     }
 
@@ -156,13 +200,20 @@ impl KeywordIndex {
         ((n - df + 0.5) / (df + 0.5) + 1.0).ln()
     }
 
-    /// One term's contribution to one document. Exposed so `chops-search query`
-    /// reports the same numbers the ranker used — the duplicated formula
-    /// in explain.rs drifted once already when BM25 landed.
-    pub fn term_score(&self, doc: u16, tf: u16, idf: f32) -> f32 {
-        let tf = tf as f32;
-        let norm = K1 * (1.0 - B + B * self.dl[doc as usize] / self.avgdl);
-        idf * (tf * (K1 + 1.0)) / (tf + norm)
+    /// One term's contribution to one document — BM25F. Each field's tf
+    /// is normalized by that field's length, the normalized tfs are
+    /// combined under the field weights (body implicitly 1.0), and
+    /// saturation applies once to the combined value. Exposed so
+    /// `chops-search query` reports the same numbers the ranker used —
+    /// the duplicated formula in explain.rs drifted once already when
+    /// BM25 landed.
+    pub fn term_score(&self, p: &Posting, idf: f32, w_title: f32, w_tag: f32) -> f32 {
+        let d = p.doc as usize;
+        let ntf = |tf: u16, dl: f32, avg: f32| tf as f32 / (1.0 - B + B * dl / avg);
+        let tfw = w_title * ntf(p.title, self.dl_title[d], self.avg_title)
+            + w_tag * ntf(p.tag, self.dl_tag[d], self.avg_tag)
+            + ntf(p.body, self.dl_body[d], self.avg_body);
+        idf * (tfw * (K1 + 1.0)) / (tfw + K1)
     }
 
     /// Terms in `sorted` that begin with `p`, as a contiguous slice.
@@ -225,7 +276,8 @@ impl KeywordIndex {
     }
 
     /// Rank docs for pre-normalized query words, with prefix expansion on
-    /// the trailing term. Ties break on doc id.
+    /// the trailing term, at the default field weights. Ties break on
+    /// doc id.
     pub fn rank(&self, query_words: &[&str]) -> Vec<u16> {
         self.rank_terms(&self.resolve(query_words, true))
     }
@@ -240,16 +292,19 @@ impl KeywordIndex {
     /// over HashMap iteration is not deterministic, and native and wasm
     /// must rank identically; and the report needs the scores after
     /// ranking, which rank_terms used to throw away.
-    pub fn score_terms(&self, terms: &[Term]) -> Vec<f32> {
+    ///
+    /// The field weights come from the caller (the engine passes its
+    /// ScoreOpts) so eval can sweep them without rebuilding the index.
+    pub fn score_terms(&self, terms: &[Term], w_title: f32, w_tag: f32) -> Vec<f32> {
         let mut scores = vec![0f32; self.n_docs as usize];
         for t in terms {
             let Some(postings) = self.terms.get(&t.text) else {
                 continue;
             };
             let idf = self.idf(postings.len());
-            for &(doc, tf) in postings {
-                if let Some(s) = scores.get_mut(doc as usize) {
-                    *s += t.weight * self.term_score(doc, tf, idf);
+            for p in postings {
+                if let Some(s) = scores.get_mut(p.doc as usize) {
+                    *s += t.weight * self.term_score(p, idf, w_title, w_tag);
                 }
             }
         }
@@ -273,7 +328,7 @@ impl KeywordIndex {
     }
 
     pub fn rank_terms(&self, terms: &[Term]) -> Vec<u16> {
-        Self::rank_from_scores(&self.score_terms(terms))
+        Self::rank_from_scores(&self.score_terms(terms, W_TITLE, W_TAG))
     }
 }
 
@@ -376,38 +431,73 @@ mod tests {
     use super::*;
     use crate::score::KW_CONFIDENCE;
 
+    /// Body-only posting — the shape every pre-BM25F fixture had, so the
+    /// df- and expansion-focused tests translate mechanically.
+    fn body(doc: u16, tf: u16) -> Posting {
+        Posting {
+            doc,
+            title: 0,
+            tag: 0,
+            body: tf,
+        }
+    }
+
+    fn post(doc: u16, title: u16, tag: u16, body: u16) -> Posting {
+        Posting {
+            doc,
+            title,
+            tag,
+            body,
+        }
+    }
+
     /// Corpus shaped like the docs site: a term for everything common, a
     /// couple of mid-frequency words, and one rare term ("routinely")
     /// reachable only by prefix-expanding "routine".
     fn confidence_index() -> KeywordIndex {
-        let mut terms: HashMap<Box<str>, Vec<(u16, u16)>> = HashMap::new();
-        terms.insert(Box::from("the"), vec![(0, 9), (1, 7), (2, 8), (3, 6)]);
-        terms.insert(Box::from("to"), vec![(0, 5), (1, 4), (2, 3), (3, 5)]);
-        terms.insert(Box::from("what"), vec![(0, 2), (1, 1), (2, 2)]);
-        terms.insert(Box::from("when"), vec![(0, 1), (1, 2), (3, 1)]);
-        terms.insert(Box::from("happens"), vec![(1, 1)]);
-        terms.insert(Box::from("process"), vec![(0, 2), (2, 1)]);
-        terms.insert(Box::from("routinely"), vec![(2, 1)]);
-        terms.insert(Box::from("search"), vec![(0, 6), (1, 5), (2, 4), (3, 7)]);
+        let mut terms: HashMap<Box<str>, Vec<Posting>> = HashMap::new();
+        terms.insert(
+            Box::from("the"),
+            vec![body(0, 9), body(1, 7), body(2, 8), body(3, 6)],
+        );
+        terms.insert(
+            Box::from("to"),
+            vec![body(0, 5), body(1, 4), body(2, 3), body(3, 5)],
+        );
+        terms.insert(Box::from("what"), vec![body(0, 2), body(1, 1), body(2, 2)]);
+        terms.insert(Box::from("when"), vec![body(0, 1), body(1, 2), body(3, 1)]);
+        terms.insert(Box::from("happens"), vec![body(1, 1)]);
+        terms.insert(Box::from("process"), vec![body(0, 2), body(2, 1)]);
+        terms.insert(Box::from("routinely"), vec![body(2, 1)]);
+        terms.insert(
+            Box::from("search"),
+            vec![body(0, 6), body(1, 5), body(2, 4), body(3, 7)],
+        );
         KeywordIndex::new(4, terms)
     }
 
     fn index() -> KeywordIndex {
-        let mut terms: HashMap<Box<str>, Vec<(u16, u16)>> = HashMap::new();
-        terms.insert(Box::from("pydub"), vec![(2, 3)]);
-        terms.insert(Box::from("the"), vec![(0, 10), (1, 8), (2, 12)]);
-        terms.insert(Box::from("bloom"), vec![(0, 2), (1, 1)]);
+        let mut terms: HashMap<Box<str>, Vec<Posting>> = HashMap::new();
+        terms.insert(Box::from("pydub"), vec![body(2, 3)]);
+        terms.insert(Box::from("the"), vec![body(0, 10), body(1, 8), body(2, 12)]);
+        terms.insert(Box::from("bloom"), vec![body(0, 2), body(1, 1)]);
         KeywordIndex::new(3, terms)
     }
 
     fn prefix_index() -> KeywordIndex {
-        let mut terms: HashMap<Box<str>, Vec<(u16, u16)>> = HashMap::new();
+        let mut terms: HashMap<Box<str>, Vec<Posting>> = HashMap::new();
         // doc0 chromiumoxide (rare), doc1 chromium (less rare),
         // doc2 chrome (common-ish), all sharing the "chro" prefix.
-        terms.insert(Box::from("chromiumoxide"), vec![(0, 4)]);
-        terms.insert(Box::from("chromium"), vec![(1, 4), (2, 1)]);
-        terms.insert(Box::from("chrome"), vec![(0, 1), (1, 1), (2, 4)]);
-        terms.insert(Box::from("filler"), vec![(0, 20), (1, 20), (2, 20)]);
+        terms.insert(Box::from("chromiumoxide"), vec![body(0, 4)]);
+        terms.insert(Box::from("chromium"), vec![body(1, 4), body(2, 1)]);
+        terms.insert(
+            Box::from("chrome"),
+            vec![body(0, 1), body(1, 1), body(2, 4)],
+        );
+        terms.insert(
+            Box::from("filler"),
+            vec![body(0, 20), body(1, 20), body(2, 20)],
+        );
         KeywordIndex::new(3, terms)
     }
 
@@ -429,22 +519,22 @@ mod tests {
 
     #[test]
     fn length_normalization_beats_tf_inflation() {
-        let mut terms: HashMap<Box<str>, Vec<(u16, u16)>> = HashMap::new();
-        terms.insert(Box::from("tasks"), vec![(0, 2), (1, 6)]);
-        terms.insert(Box::from("filler"), vec![(0, 4), (1, 294)]);
+        let mut terms: HashMap<Box<str>, Vec<Posting>> = HashMap::new();
+        terms.insert(Box::from("tasks"), vec![body(0, 2), body(1, 6)]);
+        terms.insert(Box::from("filler"), vec![body(0, 4), body(1, 294)]);
         let idx = KeywordIndex::new(2, terms);
         assert_eq!(idx.rank_exact(&["tasks"])[0], 0);
     }
 
     #[test]
     fn tf_saturates() {
-        let mut terms: HashMap<Box<str>, Vec<(u16, u16)>> = HashMap::new();
-        terms.insert(Box::from("x"), vec![(0, 3), (1, 100)]);
-        terms.insert(Box::from("pad"), vec![(0, 97)]);
+        let mut terms: HashMap<Box<str>, Vec<Posting>> = HashMap::new();
+        terms.insert(Box::from("x"), vec![body(0, 3), body(1, 100)]);
+        terms.insert(Box::from("pad"), vec![body(0, 97)]);
         let idx = KeywordIndex::new(2, terms);
         assert_eq!(idx.rank_exact(&["x"])[0], 1);
-        let s0 = idx.term_score(0, 3, 1.0);
-        let s1 = idx.term_score(1, 100, 1.0);
+        let s0 = idx.term_score(&body(0, 3), 1.0, W_TITLE, W_TAG);
+        let s1 = idx.term_score(&body(1, 100), 1.0, W_TITLE, W_TAG);
         assert!(s1 / s0 < 1.5, "saturation failed: {s1} vs {s0}");
     }
 
@@ -452,7 +542,110 @@ mod tests {
     fn empty_index_is_sane() {
         let idx = KeywordIndex::new(0, HashMap::new());
         assert!(idx.rank(&["anything"]).is_empty());
-        assert_eq!(idx.avgdl, 1.0);
+        assert_eq!(idx.avg_title, 1.0);
+        assert_eq!(idx.avg_tag, 1.0);
+        assert_eq!(idx.avg_body, 1.0);
+    }
+
+    // ---- BM25F fields ------------------------------------------------
+
+    #[test]
+    fn title_hit_outranks_body_hit() {
+        // The story's headline: same term, same tf, equal field lengths —
+        // the doc that carries it in the TITLE wins. Both docs get a
+        // 5-token title and a 20-token body so nothing rides on length.
+        let mut terms: HashMap<Box<str>, Vec<Posting>> = HashMap::new();
+        terms.insert(Box::from("tasks"), vec![post(0, 1, 0, 0), post(1, 0, 0, 1)]);
+        terms.insert(
+            Box::from("filler"),
+            vec![post(0, 4, 0, 20), post(1, 5, 0, 19)],
+        );
+        let idx = KeywordIndex::new(2, terms);
+        assert_eq!(idx.rank_exact(&["tasks"])[0], 0);
+    }
+
+    #[test]
+    fn tag_hit_outranks_title_hit_at_default_weights() {
+        // W_TAG (4) > W_TITLE (2): a tag is the author's own relevance
+        // signal. Equal tf, equal per-field lengths.
+        let mut terms: HashMap<Box<str>, Vec<Posting>> = HashMap::new();
+        terms.insert(Box::from("wasm"), vec![post(0, 0, 1, 0), post(1, 1, 0, 0)]);
+        terms.insert(
+            Box::from("filler"),
+            vec![post(0, 3, 1, 10), post(1, 2, 2, 10)],
+        );
+        let idx = KeywordIndex::new(2, terms);
+        assert_eq!(idx.rank_exact(&["wasm"])[0], 0);
+    }
+
+    #[test]
+    fn fields_normalize_by_their_own_length() {
+        // Same term at tf 1 in a 2-token title vs a 10-token title: the
+        // short title is more "about" the term. This is the per-field
+        // normalization pre-multiplied weights could never express.
+        let mut terms: HashMap<Box<str>, Vec<Posting>> = HashMap::new();
+        terms.insert(Box::from("go"), vec![post(0, 1, 0, 0), post(1, 1, 0, 0)]);
+        terms.insert(Box::from("pada"), vec![post(0, 1, 0, 0)]);
+        terms.insert(Box::from("padb"), vec![post(1, 9, 0, 0)]);
+        let idx = KeywordIndex::new(2, terms);
+        assert_eq!(idx.dl_title, vec![2.0, 10.0]);
+        let s0 = idx.term_score(&post(0, 1, 0, 0), 1.0, W_TITLE, W_TAG);
+        let s1 = idx.term_score(&post(1, 1, 0, 0), 1.0, W_TITLE, W_TAG);
+        assert!(
+            s0 > s1,
+            "short-title hit must outscore long-title: {s0} vs {s1}"
+        );
+    }
+
+    #[test]
+    fn saturation_applies_after_field_combination() {
+        // The regression the old pre-multiplication would fail: 4× the
+        // title tf must yield well under 4× the score, because the
+        // weighted, combined tf saturates against K1 as one quantity.
+        // Equal dl_title (8) on both docs isolates the tf effect.
+        let mut terms: HashMap<Box<str>, Vec<Posting>> = HashMap::new();
+        terms.insert(Box::from("x"), vec![post(0, 2, 0, 0), post(1, 8, 0, 0)]);
+        terms.insert(Box::from("pad"), vec![post(0, 6, 0, 0)]);
+        let idx = KeywordIndex::new(2, terms);
+        let s0 = idx.term_score(&post(0, 2, 0, 0), 1.0, W_TITLE, W_TAG);
+        let s1 = idx.term_score(&post(1, 8, 0, 0), 1.0, W_TITLE, W_TAG);
+        assert!(s1 > s0);
+        assert!(
+            s1 / s0 < 1.5,
+            "field weight escaped saturation: {s0} → {s1}"
+        );
+    }
+
+    #[test]
+    fn tagless_corpus_scores_without_incident() {
+        // avg_tag floors at 1.0 on a corpus with no tags anywhere; a
+        // zero tag tf contributes exactly nothing, and nothing NaNs.
+        let mut terms: HashMap<Box<str>, Vec<Posting>> = HashMap::new();
+        terms.insert(Box::from("zola"), vec![post(0, 1, 0, 3)]);
+        let idx = KeywordIndex::new(1, terms);
+        assert_eq!(idx.avg_tag, 1.0);
+        let s = idx.term_score(&post(0, 1, 0, 3), 1.0, W_TITLE, W_TAG);
+        assert!(s.is_finite() && s > 0.0);
+        assert_eq!(idx.rank_exact(&["zola"]), vec![0]);
+    }
+
+    #[test]
+    fn weights_are_sweepable_at_query_time() {
+        // The same index ranks differently under different weights — the
+        // property eval's --w-title sweep depends on. At w_title 0 a
+        // title-only hit carries no evidence and the body hit wins.
+        let mut terms: HashMap<Box<str>, Vec<Posting>> = HashMap::new();
+        terms.insert(Box::from("rrf"), vec![post(0, 1, 0, 0), post(1, 0, 0, 1)]);
+        terms.insert(
+            Box::from("filler"),
+            vec![post(0, 4, 0, 20), post(1, 5, 0, 19)],
+        );
+        let idx = KeywordIndex::new(2, terms);
+        let t = idx.resolve(&["rrf"], false);
+        let default = KeywordIndex::rank_from_scores(&idx.score_terms(&t, W_TITLE, W_TAG));
+        let no_title = KeywordIndex::rank_from_scores(&idx.score_terms(&t, 0.0, W_TAG));
+        assert_eq!(default[0], 0);
+        assert_eq!(no_title[0], 1);
     }
 
     // ---- prefix expansion --------------------------------------------
@@ -536,9 +729,12 @@ mod tests {
 
     #[test]
     fn expansion_count_is_capped() {
-        let mut terms: HashMap<Box<str>, Vec<(u16, u16)>> = HashMap::new();
+        let mut terms: HashMap<Box<str>, Vec<Posting>> = HashMap::new();
         for i in 0..50 {
-            terms.insert(Box::from(format!("prefix{i:02}").as_str()), vec![(0, 1)]);
+            terms.insert(
+                Box::from(format!("prefix{i:02}").as_str()),
+                vec![body(0, 1)],
+            );
         }
         let idx = KeywordIndex::new(1, terms);
         let n = idx

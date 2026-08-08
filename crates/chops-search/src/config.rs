@@ -28,7 +28,7 @@
 //! chunk_chars = 600
 //! prefix_rows = 2048
 //!
-//! title_weight = 2      # a title mention counts like N body mentions
+//! title_weight = 2      # BM25F: a title occurrence against a body one
 //! tag_weight   = 4      # tags are the author's own relevance signal
 //! ```
 
@@ -49,8 +49,18 @@ pub struct Config {
     pub dims: Option<usize>,
     pub chunk_chars: usize,
     pub prefix_rows: u32,
-    pub title_weight: u16,
-    pub tag_weight: u16,
+    /// BM25F field weights, baked into index.bin so the browser scores
+    /// with what the site configured.
+    ///
+    /// These are NOT the pre-multiplied term-frequency multipliers they
+    /// replaced. The old scheme counted a title mention as N body
+    /// mentions before saturation, which let a weighted title tf run
+    /// straight past k1. BM25F normalizes each field by its own length,
+    /// combines the normalized tfs under these weights, and saturates
+    /// once — so a weight biases without inflating, and the useful range
+    /// is small. 0.0 is legal and means "ignore this field".
+    pub title_weight: f32,
+    pub tag_weight: f32,
 }
 
 impl Config {
@@ -64,8 +74,8 @@ impl Config {
             dims: None,
             chunk_chars: 600,
             prefix_rows: 2048,
-            title_weight: 2,
-            tag_weight: 4,
+            title_weight: chops_search_core::keyword::W_TITLE,
+            tag_weight: chops_search_core::keyword::W_TAG,
         }
     }
 
@@ -122,6 +132,21 @@ impl Config {
                     .with_context(|| format!("{key} must be an integer")),
             }
         };
+        // Field weights are f32 but must still accept `title_weight = 2`:
+        // TOML types that as an integer, and every config written before
+        // BM25F landed (including the one `chops-search init` scaffolds)
+        // spells them without a decimal point. Rejecting integers here
+        // would break those sites on upgrade for no reason.
+        let num = |key: &str| -> Result<Option<f64>> {
+            match t.get(key) {
+                None => Ok(None),
+                Some(v) => v
+                    .as_float()
+                    .or_else(|| v.as_integer().map(|i| i as f64))
+                    .map(Some)
+                    .with_context(|| format!("{key} must be a number")),
+            }
+        };
         if let Some(v) = int("dims")? {
             if v <= 0 {
                 anyhow::bail!("dims must be positive");
@@ -140,17 +165,21 @@ impl Config {
             }
             cfg.prefix_rows = v as u32;
         }
-        if let Some(v) = int("title_weight")? {
-            if !(1..=u16::MAX as i64).contains(&v) {
-                anyhow::bail!("title_weight out of range");
+        // 0.0 is meaningful ("ignore titles"), so the floor is zero, not
+        // one. The ceiling is a sanity rail: past ~100 the combined tf
+        // saturates on the field alone and the other fields stop
+        // mattering, which is a config mistake rather than a strategy.
+        let weight = |key: &str, v: f64| -> Result<f32> {
+            if !v.is_finite() || !(0.0..=100.0).contains(&v) {
+                anyhow::bail!("{key} must be between 0 and 100");
             }
-            cfg.title_weight = v as u16;
+            Ok(v as f32)
+        };
+        if let Some(v) = num("title_weight")? {
+            cfg.title_weight = weight("title_weight", v)?;
         }
-        if let Some(v) = int("tag_weight")? {
-            if !(1..=u16::MAX as i64).contains(&v) {
-                anyhow::bail!("tag_weight out of range");
-            }
-            cfg.tag_weight = v as u16;
+        if let Some(v) = num("tag_weight")? {
+            cfg.tag_weight = weight("tag_weight", v)?;
         }
 
         // Unknown keys are an error, not a shrug: a misspelled `chunk_size`
@@ -179,6 +208,11 @@ impl Config {
 
     /// Apply CLI overrides. Flags win so one-off experiments don't need a
     /// config edit.
+    ///
+    /// The field weights are deliberately absent: they're a query-time
+    /// knob, swept with `eval --w-title` / `query --w-title` against an
+    /// index that's already built. Only the value baked into index.bin —
+    /// what the browser will use — comes from here.
     pub fn with_overrides(
         mut self,
         content: Option<PathBuf>,
@@ -250,6 +284,25 @@ mod tests {
         assert!(Config::load(&write(&tmp, "dims = 0\n")).is_err());
         assert!(Config::load(&write(&tmp, "dims = \"128\"\n")).is_err());
         assert!(Config::load(&write(&tmp, "chunk_chars = 10\n")).is_err());
+        assert!(Config::load(&write(&tmp, "title_weight = -1\n")).is_err());
+        assert!(Config::load(&write(&tmp, "tag_weight = 1000\n")).is_err());
+        assert!(Config::load(&write(&tmp, "title_weight = \"2\"\n")).is_err());
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn weights_accept_integers_and_floats() {
+        // Every config written before BM25F spells these without a
+        // decimal point, and TOML types those as integers. Both forms
+        // must load, or the change breaks sites on upgrade.
+        let tmp = std::env::temp_dir().join(format!("chops-cfg-w-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let cfg = Config::load(&write(&tmp, "title_weight = 2\ntag_weight = 4\n")).unwrap();
+        assert_eq!(cfg.title_weight, 2.0);
+        assert_eq!(cfg.tag_weight, 4.0);
+        let cfg = Config::load(&write(&tmp, "title_weight = 1.5\ntag_weight = 0.0\n")).unwrap();
+        assert_eq!(cfg.title_weight, 1.5);
+        assert_eq!(cfg.tag_weight, 0.0, "zero means ignore the field");
         std::fs::remove_dir_all(&tmp).ok();
     }
 
@@ -278,5 +331,7 @@ mod tests {
         assert_eq!(cfg.content, PathBuf::from("/site/content"));
         assert_eq!(cfg.out, PathBuf::from("/site/static/search"));
         assert_eq!(cfg.chunk_chars, 600);
+        // Defaults track core's constants rather than restating them.
+        assert_eq!(cfg.title_weight, chops_search_core::keyword::W_TITLE);
     }
 }

@@ -12,6 +12,11 @@
 //! if this ever moves to wasm SIMD, accumulate i32 (i16x8 extmul + pairwise
 //! add), never i8.
 //!
+//! `ScoreOpts` lives here but is the tuning surface for BOTH halves of the
+//! hybrid: the semantic floor and chunk correction below, plus the keyword
+//! side's confidence gate and BM25F field weights. One struct because eval
+//! sweeps them together and the engine carries exactly one of them.
+//!
 //! Two corrections sit on top of raw max-pooling, both driven by measured
 //! behavior rather than taste:
 //!
@@ -67,6 +72,14 @@ pub struct ScoreOpts {
     pub kw_confidence: f32,
     pub min_gap: f32,
     pub strong_cos: f32,
+    /// BM25F field weights: what a length-normalized title or tag
+    /// occurrence is worth against a body occurrence (body is fixed at
+    /// 1.0). Defaults come from `keyword::W_TITLE`/`W_TAG`, but the
+    /// engine overwrites them from `index.bin` at construction, since the
+    /// values a corpus was built with belong with the corpus. Sweep with
+    /// `chops-search eval --w-title/--w-tag`.
+    pub w_title: f32,
+    pub w_tag: f32,
 }
 
 /// A ranked document plus the chunk that earned it its score — the chunk
@@ -98,6 +111,8 @@ impl Default for ScoreOpts {
             kw_confidence: KW_CONFIDENCE,
             min_gap: 0.0,
             strong_cos: f32::INFINITY,
+            w_title: crate::keyword::W_TITLE,
+            w_tag: crate::keyword::W_TAG,
         }
     }
 }
@@ -105,6 +120,12 @@ impl Default for ScoreOpts {
 impl ScoreOpts {
     /// Raw max-pooling with no floor and no correction — the pre-correction
     /// behavior, kept for A/B comparison in eval.
+    ///
+    /// Field weights are deliberately NOT zeroed here. Every other field
+    /// this disables is a gate or a correction sitting on top of a
+    /// ranking; the weights ARE the keyword ranking function, and
+    /// stripping them would make the baseline a different scorer rather
+    /// than the same scorer unjudged.
     pub fn raw() -> Self {
         ScoreOpts {
             min_cos: f32::NEG_INFINITY,
@@ -112,6 +133,8 @@ impl ScoreOpts {
             kw_confidence: 0.0,
             min_gap: 0.0,
             strong_cos: f32::INFINITY,
+            w_title: crate::keyword::W_TITLE,
+            w_tag: crate::keyword::W_TAG,
         }
     }
 }
@@ -427,5 +450,17 @@ mod tests {
         };
         assert!(rank_scored(&ds, opts).is_empty());
         assert!((top_median_gap(&ds.best) - 0.28).abs() < 1e-6);
+    }
+
+    #[test]
+    fn raw_keeps_the_field_weights() {
+        // raw() disables gates and corrections, not the ranking function.
+        // A raw() that zeroed the weights would make the eval baseline a
+        // body-only scorer and quietly overstate what BM25F bought.
+        let raw = ScoreOpts::raw();
+        assert_eq!(raw.w_title, crate::keyword::W_TITLE);
+        assert_eq!(raw.w_tag, crate::keyword::W_TAG);
+        assert_eq!(raw.w_title, ScoreOpts::default().w_title);
+        assert_eq!(raw.w_tag, ScoreOpts::default().w_tag);
     }
 }

@@ -71,7 +71,7 @@ pub struct DocEvidence {
     pub fused: f32,
     /// Position in the keyword list, when it contributed (0-based).
     pub kw_rank: Option<u16>,
-    /// BM25 evidence — populated even when the confidence gate suppressed
+    /// BM25F evidence — populated even when the confidence gate suppressed
     /// the list, so a suppressed run still shows what the evidence was.
     pub kw_score: f32,
     /// Position in the semantic list, when it contributed (0-based).
@@ -91,7 +91,13 @@ pub struct SearchReport {
     /// Typed words that matched no corpus term (and, for the trailing
     /// word, produced no expansions either).
     pub unmatched: Vec<Box<str>>,
-    pub avgdl: f32,
+    /// Mean field lengths BM25F normalized against. Three numbers, not
+    /// one: a title hit's score only makes sense against the average
+    /// title, and explain has to be able to show that a 4-word title in
+    /// a corpus averaging 6 was the reason a doc won.
+    pub avg_title: f32,
+    pub avg_tag: f32,
+    pub avg_body: f32,
     pub kw_confidence: f32,
     pub kw_gated: bool,
     pub semantic: SemanticStatus,
@@ -132,6 +138,8 @@ impl Engine {
             }
             chunk_counts[d] += 1;
         }
+        // Read off `index` before it moves into the struct literal below.
+        let (w_title, w_tag) = (index.w_title, index.w_tag);
         Ok(Engine {
             vocab,
             store,
@@ -143,11 +151,20 @@ impl Engine {
             best_chunk: vec![u32::MAX; n_docs],
             chunk_counts,
             doc_first_chunk,
-            // The floor scales with dimensionality, so it cannot be a
-            // plain default: PCA raises noise cosines, and a value
-            // calibrated at 256 dims is too permissive at 128.
+            // Two different provenances in one struct, deliberately:
+            //
+            // min_cos is DERIVED from geometry. The floor scales with
+            // dimensionality, so it cannot be a plain default: PCA raises
+            // noise cosines, and a value calibrated at 256 dims is too
+            // permissive at 128.
+            //
+            // The field weights are READ FROM THE ARTIFACT. They're
+            // corpus-dependent, not derivable, and index.bin is the only
+            // way the browser can learn what chops-search.toml said.
             opts: crate::score::ScoreOpts {
                 min_cos: crate::score::min_cos_for(dim),
+                w_title,
+                w_tag,
                 ..Default::default()
             },
         })
@@ -193,19 +210,22 @@ impl Engine {
         self.store.ingest(byte_start as usize, bytes)
     }
     /// The scoring thresholds currently in effect. `min_cos` is derived
-    /// from the index's dimensionality at construction, so this is the
+    /// from the index's dimensionality and the BM25F field weights come
+    /// from index.bin, so this — not `ScoreOpts::default()` — is the
     /// right base for a caller that wants to override one field.
     pub fn score_opts(&self) -> crate::score::ScoreOpts {
         self.opts
     }
 
     /// Override scoring thresholds (eval sweeps these; the browser uses
-    /// the defaults).
+    /// the defaults). Passing a bare `ScoreOpts::default()` here would
+    /// silently discard the index's own field weights — build from
+    /// `score_opts()` instead.
     pub fn set_score_opts(&mut self, opts: crate::score::ScoreOpts) {
         self.opts = opts;
     }
 
-    /// Hybrid search: keyword tf-idf and semantic ranked lists fused with
+    /// Hybrid search: keyword BM25F and semantic ranked lists fused with
     /// RRF. Returns ranked doc ids, truncated to `limit`.
     pub fn search(&mut self, query: &str, limit: usize) -> Vec<u16> {
         self.search_detailed(query).ids(limit)
@@ -225,7 +245,11 @@ impl Engine {
         let kw_gated = kw_confidence < self.opts.kw_confidence;
         // Scores are computed even when gated: the report shows the
         // evidence that WAS suppressed, which is the diagnostic point.
-        let kw_scores = self.kw.score_terms(&terms);
+        // Weights come from opts, not from the index, so an eval sweep
+        // re-ranks without rebuilding.
+        let kw_scores = self
+            .kw
+            .score_terms(&terms, self.opts.w_title, self.opts.w_tag);
         let kw_ranked = if kw_gated {
             Vec::new()
         } else {
@@ -331,7 +355,9 @@ impl Engine {
             kw_words: words.iter().map(|w| Box::from(*w)).collect(),
             terms: term_evidence,
             unmatched,
-            avgdl: self.kw.avgdl,
+            avg_title: self.kw.avg_title,
+            avg_tag: self.kw.avg_tag,
+            avg_body: self.kw.avg_body,
             kw_confidence,
             kw_gated,
             semantic,

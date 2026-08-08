@@ -13,11 +13,19 @@
 //! (tens of KB for a blog), loads with the meta:
 //!
 //!   magic "CHPI" | version u16 | dim u16 | gscale f32
+//!   w_title f32 | w_tag f32                     (BM25F field weights)
 //!   n_docs u16 | docs: n_docs × { url str16, title str16 }
 //!   n_chunks u32 | chunk_doc: n_chunks × u16
 //!   chunk_vecs: n_chunks × dim × i8
 //!   n_terms u32 | terms: n_terms × { term str16, n_post u16,
-//!                                    postings n_post × { doc u16, tf u16 } }
+//!                                    postings n_post × { doc u16,
+//!                                      title u16, tag u16, body u16 } }
+//!
+//! The field weights are stored rather than compiled in because the right
+//! values are corpus-dependent — the same reason `min_cos` is per-index —
+//! and because the browser has no other way to learn what
+//! `chops-search.toml` said. The CLI can still override them per run for
+//! sweeps.
 //!
 //! The row matrix itself (`model.rows.i8`) is deliberately headerless raw
 //! bytes so that row i sits at byte offset exactly i × dim — that identity
@@ -33,7 +41,12 @@ use std::collections::HashMap;
 
 const MAGIC_MODEL: &[u8; 4] = b"CHPM";
 const MAGIC_INDEX: &[u8; 4] = b"CHPI";
-const VERSION: u16 = 1;
+/// Bumped to 3 for BM25F: postings grew from 4 to 8 bytes and the header
+/// gained the field weights. A v2 reader would parse a v3 file into
+/// plausible garbage rather than failing, so the version check is what
+/// makes the layout change safe. Both artifacts share the constant and
+/// are rebuilt together; the meta layout itself is unchanged.
+const VERSION: u16 = 3;
 
 pub struct ModelMeta {
     pub dim: u16,
@@ -101,16 +114,32 @@ pub struct Doc {
     pub title: String,
 }
 
+/// Per-field term frequencies for one document. Fields are separate
+/// rather than pre-multiplied because BM25F normalizes each field by
+/// its own length: a term in a 5-word title should score like a term
+/// in a 5-word field, not get averaged against 2,000 words of body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Posting {
+    pub doc: u16,
+    pub title: u16,
+    pub tag: u16,
+    pub body: u16,
+}
+
 pub struct Index {
     pub dim: u16,
     pub global_scale: f32,
+    /// BM25F field weights this index was built to be scored with. Body
+    /// is implicitly 1.0, so these two are the whole knob set.
+    pub w_title: f32,
+    pub w_tag: f32,
     pub docs: Vec<Doc>,
     /// chunk index → doc id
     pub chunk_doc: Vec<u16>,
     /// n_chunks × dim
     pub chunk_vecs: Vec<i8>,
-    /// term → postings (doc, tf)
-    pub terms: Vec<(String, Vec<(u16, u16)>)>,
+    /// term → postings, each carrying per-field term frequencies
+    pub terms: Vec<(String, Vec<Posting>)>,
 }
 
 impl Index {
@@ -120,6 +149,8 @@ impl Index {
         w.u16(VERSION);
         w.u16(self.dim);
         w.f32(self.global_scale);
+        w.f32(self.w_title);
+        w.f32(self.w_tag);
         w.u16(self.docs.len() as u16);
         for d in &self.docs {
             w.str16(&d.url);
@@ -134,9 +165,11 @@ impl Index {
         for (term, postings) in &self.terms {
             w.str16(term);
             w.u16(postings.len() as u16);
-            for &(doc, tf) in postings {
-                w.u16(doc);
-                w.u16(tf);
+            for p in postings {
+                w.u16(p.doc);
+                w.u16(p.title);
+                w.u16(p.tag);
+                w.u16(p.body);
             }
         }
         w.buf
@@ -152,6 +185,15 @@ impl Index {
         }
         let dim = r.u16()?;
         let global_scale = r.f32()?;
+        let w_title = r.f32()?;
+        let w_tag = r.f32()?;
+        // A NaN weight would silently NaN every score it touched, and a
+        // negative one would make a field's presence count against the
+        // document. Neither is a state the builder can produce, so reject
+        // the artifact rather than ranking on it.
+        if !w_title.is_finite() || !w_tag.is_finite() || w_title < 0.0 || w_tag < 0.0 {
+            return Err(FormatError::Inconsistent("field weight out of range"));
+        }
         let n_docs = r.u16()? as usize;
         let mut docs = Vec::with_capacity(n_docs);
         for _ in 0..n_docs {
@@ -174,20 +216,29 @@ impl Index {
         for _ in 0..n_terms {
             let term = r.str16()?.to_owned();
             let n_post = r.u16()? as usize;
-            let mut postings = Vec::with_capacity(n_post);
+            let mut postings: Vec<Posting> = Vec::with_capacity(n_post);
             for _ in 0..n_post {
                 let doc = r.u16()?;
-                let tf = r.u16()?;
+                let title = r.u16()?;
+                let tag = r.u16()?;
+                let body = r.u16()?;
                 if doc as usize >= n_docs {
                     return Err(FormatError::Inconsistent("posting points past docs"));
                 }
-                postings.push((doc, tf));
+                postings.push(Posting {
+                    doc,
+                    title,
+                    tag,
+                    body,
+                });
             }
             terms.push((term, postings));
         }
         Ok(Index {
             dim,
             global_scale,
+            w_title,
+            w_tag,
             docs,
             chunk_doc,
             chunk_vecs,
@@ -195,8 +246,11 @@ impl Index {
         })
     }
 
+    /// The keyword half of this index. Weights are deliberately NOT baked
+    /// in here: they live in `ScoreOpts`, seeded from `w_title`/`w_tag` at
+    /// engine construction, so eval can sweep them without a rebuild.
     pub fn keyword_index(&self) -> KeywordIndex {
-        let mut map: HashMap<Box<str>, Vec<(u16, u16)>> = HashMap::new();
+        let mut map: HashMap<Box<str>, Vec<Posting>> = HashMap::new();
         for (term, postings) in &self.terms {
             map.insert(Box::from(term.as_str()), postings.clone());
         }
@@ -207,6 +261,15 @@ impl Index {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn post(doc: u16, title: u16, tag: u16, body: u16) -> Posting {
+        Posting {
+            doc,
+            title,
+            tag,
+            body,
+        }
+    }
 
     #[test]
     fn model_meta_roundtrip() {
@@ -229,19 +292,48 @@ mod tests {
         let idx = Index {
             dim: 2,
             global_scale: 0.01,
+            w_title: 2.0,
+            w_tag: 4.0,
             docs: vec![Doc {
                 url: "/a/".into(),
                 title: "A".into(),
             }],
             chunk_doc: vec![0, 0],
             chunk_vecs: vec![1, -2, 3, -4],
-            terms: vec![("pydub".into(), vec![(0, 3)])],
+            terms: vec![("pydub".into(), vec![post(0, 1, 2, 3)])],
         };
         let bytes = idx.write();
         let back = Index::read(&bytes).unwrap();
         assert_eq!(back.docs.len(), 1);
         assert_eq!(back.chunk_vecs, vec![1, -2, 3, -4]);
         assert_eq!(back.terms[0].0, "pydub");
+        // Every field survives independently: a transposed pair here
+        // would silently swap title and tag weighting at query time.
+        assert_eq!(back.terms[0].1, vec![post(0, 1, 2, 3)]);
+        assert_eq!(back.w_title, 2.0);
+        assert_eq!(back.w_tag, 4.0);
+    }
+
+    #[test]
+    fn zero_weights_are_legal() {
+        // w_title = 0 is a meaningful sweep point ("ignore titles"), not
+        // a corrupt artifact.
+        let idx = Index {
+            dim: 1,
+            global_scale: 0.01,
+            w_title: 0.0,
+            w_tag: 0.0,
+            docs: vec![Doc {
+                url: "/a/".into(),
+                title: "A".into(),
+            }],
+            chunk_doc: vec![0],
+            chunk_vecs: vec![1],
+            terms: vec![("a".into(), vec![post(0, 0, 0, 1)])],
+        };
+        let back = Index::read(&idx.write()).unwrap();
+        assert_eq!(back.w_title, 0.0);
+        assert_eq!(back.w_tag, 0.0);
     }
 
     #[test]
@@ -249,6 +341,58 @@ mod tests {
         assert_eq!(
             ModelMeta::read(b"XXXX0000").err(),
             Some(FormatError::BadHeader)
+        );
+    }
+
+    #[test]
+    fn stale_version_rejected() {
+        // The v2 posting record was half the width of v3's. Reading one
+        // as the other must fail at the header, not at the postings.
+        let mut bytes = Index {
+            dim: 1,
+            global_scale: 0.01,
+            w_title: 2.0,
+            w_tag: 4.0,
+            docs: vec![Doc {
+                url: "/a/".into(),
+                title: "A".into(),
+            }],
+            chunk_doc: vec![0],
+            chunk_vecs: vec![1],
+            terms: vec![("a".into(), vec![post(0, 0, 0, 1)])],
+        }
+        .write();
+        bytes[4..6].copy_from_slice(&2u16.to_le_bytes());
+        assert_eq!(Index::read(&bytes).err(), Some(FormatError::BadHeader));
+    }
+
+    #[test]
+    fn nonsense_weights_rejected() {
+        let mut bytes = Index {
+            dim: 1,
+            global_scale: 0.01,
+            w_title: 2.0,
+            w_tag: 4.0,
+            docs: vec![Doc {
+                url: "/a/".into(),
+                title: "A".into(),
+            }],
+            chunk_doc: vec![0],
+            chunk_vecs: vec![1],
+            terms: vec![("a".into(), vec![post(0, 0, 0, 1)])],
+        }
+        .write();
+        // w_title sits at magic(4) + version(2) + dim(2) + gscale(4) = 12.
+        bytes[12..16].copy_from_slice(&f32::NAN.to_le_bytes());
+        assert_eq!(
+            Index::read(&bytes).err(),
+            Some(FormatError::Inconsistent("field weight out of range"))
+        );
+
+        bytes[12..16].copy_from_slice(&(-1.0f32).to_le_bytes());
+        assert_eq!(
+            Index::read(&bytes).err(),
+            Some(FormatError::Inconsistent("field weight out of range"))
         );
     }
 }

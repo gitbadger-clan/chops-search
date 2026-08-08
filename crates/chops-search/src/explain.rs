@@ -2,14 +2,22 @@
 //!
 //! Loads meta, index, and the full row matrix, runs the identical
 //! chops-search-core surface natively, and prints the evidence behind the
-//! ranking: keyword scores, best-chunk cosine, chunk count, and each
-//! engine's RRF contribution per document.
+//! ranking: keyword scores with the fields they came from, best-chunk
+//! cosine, chunk count, and each engine's RRF contribution per document.
 //!
 //! Keyword scoring goes through `KeywordIndex::idf`/`term_score`, so it
 //! cannot drift from the ranker — it did once, when BM25 landed here a
 //! commit later than in core. Only the RRF contribution arithmetic is
 //! still restated, because core discards scores after ranking.
+//!
+//! The per-field term frequencies come from `index.bin` directly rather
+//! than from the report: `SearchReport` carries df and idf per term, but
+//! not per-doc field tfs, and the engine's keyword index is private. With
+//! BM25F, "which field did this term turn up in" is the first question
+//! worth asking about a surprising ranking, so it's worth the second
+//! parse of a file already in memory.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
@@ -33,6 +41,23 @@ pub fn list_docs(artifacts: &Path) -> Result<()> {
         println!("{:<4} {:>6}  {:<44} {}", i, chunks[i], d.url, d.title);
     }
     Ok(())
+}
+
+/// Per-doc field term frequencies, summed over every resolved query term.
+/// Raw counts, not weighted: the weights are printed in the scoring line
+/// and applying them here would produce a number that appears nowhere in
+/// the ranker.
+#[derive(Default, Clone, Copy)]
+struct FieldTotals {
+    title: u32,
+    tag: u32,
+    body: u32,
+}
+
+impl FieldTotals {
+    fn is_empty(&self) -> bool {
+        self.title == 0 && self.tag == 0 && self.body == 0
+    }
 }
 
 pub fn explain(artifacts: &Path, query: &str, limit: usize, args: ScoreArgs) -> Result<()> {
@@ -74,8 +99,10 @@ pub fn explain(artifacts: &Path, query: &str, limit: usize, args: ScoreArgs) -> 
     println!("kw words:  {:?}", report.kw_words);
     println!("wordpiece: {pieces:?}");
     println!(
-        "kw:        avgdl={:.1}, confidence {:.2} (floor {:.2}){}",
-        report.avgdl,
+        "kw:        avg len title {:.1}, tag {:.1}, body {:.1}; confidence {:.2} (floor {:.2}){}",
+        report.avg_title,
+        report.avg_tag,
+        report.avg_body,
         report.kw_confidence,
         opts.kw_confidence,
         if report.kw_gated {
@@ -99,6 +126,31 @@ pub fn explain(artifacts: &Path, query: &str, limit: usize, args: ScoreArgs) -> 
     }
     for w in &report.unmatched {
         println!("keyword:   {w:?} matches no documents");
+    }
+
+    // Postings for the resolved terms, straight out of the artifact. The
+    // report knows df but not where in a document a term landed, and
+    // under BM25F that's the difference between a title match and a
+    // passing mention in paragraph nine.
+    let index = Index::read(&index_bytes).context("parsing index")?;
+    let postings: HashMap<&str, _> = index
+        .terms
+        .iter()
+        .map(|(term, p)| (term.as_str(), p))
+        .collect();
+    let mut fields = vec![FieldTotals::default(); index.docs.len()];
+    for t in &report.terms {
+        let Some(list) = postings.get(t.term.as_ref()) else {
+            continue;
+        };
+        for p in list.iter() {
+            let Some(f) = fields.get_mut(p.doc as usize) else {
+                continue;
+            };
+            f.title += p.title as u32;
+            f.tag += p.tag as u32;
+            f.body += p.body as u32;
+        }
     }
 
     match report.semantic {
@@ -127,14 +179,16 @@ pub fn explain(artifacts: &Path, query: &str, limit: usize, args: ScoreArgs) -> 
     }
 
     println!();
+    println!("t/g/b:     title/tag/body term frequencies, summed over the terms above");
     println!(
-        "{:<4} {:>8} {:>4} {:>9} {:>5} {:>9} {:>8} {:>7}  title",
-        "doc", "fused", "kw#", "kw-score", "sem#", "best-cos", "penalty", "chunks"
+        "{:<4} {:>8} {:>4} {:>9} {:>9} {:>5} {:>9} {:>8} {:>7}  title",
+        "doc", "fused", "kw#", "kw-score", "t/g/b", "sem#", "best-cos", "penalty", "chunks"
     );
     let rank = |r: Option<u16>| r.map_or_else(|| "-".to_string(), |r| (r + 1).to_string());
     for d in report.docs.iter().take(limit) {
+        let f = fields.get(d.doc as usize).copied().unwrap_or_default();
         println!(
-            "{:<4} {:>8.5} {:>4} {:>9} {:>5} {:>9} {:>8} {:>7}  {}",
+            "{:<4} {:>8.5} {:>4} {:>9} {:>9} {:>5} {:>9} {:>8} {:>7}  {}",
             d.doc,
             d.fused,
             rank(d.kw_rank),
@@ -142,6 +196,11 @@ pub fn explain(artifacts: &Path, query: &str, limit: usize, args: ScoreArgs) -> 
                 format!("{:.3}", d.kw_score)
             } else {
                 "-".into()
+            },
+            if f.is_empty() {
+                "-".to_string()
+            } else {
+                format!("{}/{}/{}", f.title, f.tag, f.body)
             },
             rank(d.sem_rank),
             d.best_cos.map_or("-".into(), |c| format!("{c:.3}")),

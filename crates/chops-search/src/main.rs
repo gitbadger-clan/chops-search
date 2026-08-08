@@ -38,7 +38,7 @@ use chops_search_core::builder::{
     embed_f32, frequency_permutation, permute_rows_f32, quantize_global, quantize_rows,
 };
 use chops_search_core::chunk::{chunk_prose, prepare_markdown};
-use chops_search_core::format::{Doc, Index, ModelMeta};
+use chops_search_core::format::{Doc, Index, ModelMeta, Posting};
 use chops_search_core::keyword::keyword_words;
 use chops_search_core::wordpiece::Vocab;
 
@@ -62,9 +62,10 @@ Docs: https://github.com/gitbadger-clan/chops-search";
     version,
     about = "Hybrid keyword + semantic search for static sites",
     long_about = "\
-Builds a browser-side search index for a static site: BM25 over keyword \
-postings fused with cosine similarity over model2vec embeddings, served \
-as static files and queried without a server.
+Builds a browser-side search index for a static site: BM25F over keyword \
+postings (title, tags, and body scored as separate fields) fused with \
+cosine similarity over model2vec embeddings, served as static files and \
+queried without a server.
 
 Run `chops-search init` in a Zola site to get started.",
     after_help = AFTER_HELP
@@ -162,7 +163,12 @@ wasm engine, worker, page script, and stylesheet into the output \
 directory.
 
 Content changes touch only index.bin and snippets.bin. The model files \
-change when the model does, and the wasm caches across every deploy.")]
+change when the model does, and the wasm caches across every deploy.
+
+The BM25F field weights from chops-search.toml are written into \
+index.bin, so the browser scores with what the site configured. Sweep \
+them with `eval --w-title` / `--w-tag` against a built index; only the \
+committed value needs a rebuild.")]
     Build {
         /// Content directory. Default: `content` from chops-search.toml.
         #[arg(long, value_name = "DIR")]
@@ -214,11 +220,13 @@ failure rather than a typo, which is a bad afternoon.")]
     /// Explain why a query ranked the way it did.
     #[command(long_about = "\
 Prints the evidence behind a ranking: how the query tokenized on both \
-sides, per-term keyword scores with document frequencies, best-chunk \
-cosine per document, and each engine's contribution to the fused order.
+sides, per-term keyword scores with document frequencies and per-field \
+term frequencies, best-chunk cosine per document, and each engine's \
+contribution to the fused order.
 
 This is the diagnostic tool. When a result looks wrong, the answer is \
-almost always visible in the chunk count or the term frequencies.")]
+almost always visible in the chunk count or in which field the term \
+turned up in.")]
     Query {
         /// The query string.
         #[arg(value_name = "QUERY")]
@@ -236,6 +244,20 @@ almost always visible in the chunk count or the term frequencies.")]
         /// keyword list is suppressed from fusion. 0 disables.
         #[arg(long, value_name = "FRACTION")]
         kw_floor: Option<f32>,
+        /// BM25F weight on title matches. Default: whatever index.bin
+        /// was built with.
+        ///
+        /// For asking whether a result still wins without its title:
+        /// 0 ignores the field entirely.
+        #[arg(long, value_name = "WEIGHT")]
+        w_title: Option<f32>,
+        /// BM25F weight on tag matches. Default: whatever index.bin was
+        /// built with.
+        ///
+        /// Tags are the author's own statement of what a page is about,
+        /// so they normally outweigh the title.
+        #[arg(long, value_name = "WEIGHT")]
+        w_tag: Option<f32>,
         /// Minimum top-median cosine contrast for an uncorroborated
         /// semantic list. Default 0 (disabled).
         ///
@@ -296,6 +318,21 @@ the real ones.")]
         /// than no ranking. 0 disables the gate.
         #[arg(long, value_name = "FRACTION")]
         kw_floor: Option<f32>,
+        /// BM25F weight on title matches. Default: whatever index.bin
+        /// was built with.
+        ///
+        /// For sweeping. Under BM25F a title hit is already normalized
+        /// by the title's own length, so the useful range is small and
+        /// well under the old pre-multiplied weight. 0 ignores titles.
+        #[arg(long, value_name = "WEIGHT")]
+        w_title: Option<f32>,
+        /// BM25F weight on tag matches. Default: whatever index.bin was
+        /// built with.
+        ///
+        /// For sweeping. Tags are short and hand-picked, so they carry
+        /// more per occurrence than anything else on the page.
+        #[arg(long, value_name = "WEIGHT")]
+        w_tag: Option<f32>,
         /// Coefficient on the chunk-count correction. Default 0.02.
         ///
         /// For sweeping. Longer documents get more chances at a high
@@ -384,6 +421,8 @@ fn main() -> Result<()> {
             limit,
             query,
             kw_floor,
+            w_title,
+            w_tag,
             min_gap,
             strong_cos,
         } => {
@@ -391,6 +430,8 @@ fn main() -> Result<()> {
             let dir = artifacts.unwrap_or(cfg.out);
             let args = chops_search::eval::ScoreArgs {
                 kw_floor,
+                w_title,
+                w_tag,
                 min_gap,
                 strong_cos,
                 ..Default::default()
@@ -405,6 +446,8 @@ fn main() -> Result<()> {
             min_cos,
             chunk_penalty,
             kw_floor,
+            w_title,
+            w_tag,
             min_gap,
             strong_cos,
         } => {
@@ -417,6 +460,8 @@ fn main() -> Result<()> {
                 kw_floor,
                 min_gap,
                 strong_cos,
+                w_title,
+                w_tag,
             };
             chops_search::eval::eval(&dir, &queries, kind.as_deref(), fail_under, args)
         }
@@ -489,6 +534,39 @@ fn clean_artifacts(out: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Which BM25F field a run of words belongs to.
+#[derive(Debug, Clone, Copy)]
+enum Field {
+    Title,
+    Tag,
+    Body,
+}
+
+/// Per-field term frequencies for one term in one document. Raw counts,
+/// deliberately unweighted: the field weights apply at query time, after
+/// each field has been normalized by its own length. Pre-multiplying here
+/// (what this used to do) pushed a weighted title tf past k1's saturation
+/// point, so a title mention behaved like keyword stuffing.
+#[derive(Debug, Default, Clone, Copy)]
+struct FieldTf {
+    title: u16,
+    tag: u16,
+    body: u16,
+}
+
+impl FieldTf {
+    fn add(&mut self, field: Field) {
+        let slot = match field {
+            Field::Title => &mut self.title,
+            Field::Tag => &mut self.tag,
+            Field::Body => &mut self.body,
+        };
+        // A term appearing 65k times in one body is absurd but not worth
+        // failing a build over.
+        *slot = slot.saturating_add(1);
+    }
+}
+
 fn build(cfg: &Config, runtime: bool) -> Result<()> {
     // ---- 1. Load model -------------------------------------------------
     let (tokens, mut rows, mut dim) = load_model2vec(&cfg.model)?;
@@ -522,7 +600,7 @@ fn build(cfg: &Config, runtime: bool) -> Result<()> {
     }
     let mut chunks: Vec<ChunkRec> = Vec::new();
     let mut docs: Vec<Doc> = Vec::new();
-    let mut doc_words: Vec<HashMap<String, u16>> = Vec::new();
+    let mut doc_words: Vec<HashMap<String, FieldTf>> = Vec::new();
 
     for post in &posts {
         let (fm, body) = frontmatter::split(&post.markdown)
@@ -555,21 +633,23 @@ fn build(cfg: &Config, runtime: bool) -> Result<()> {
         let url = url_for(&post.rel, &fm);
 
         // Keyword terms: word-level tokens (post-normalization,
-        // pre-WordPiece). Tags weigh hardest, then title, then body.
+        // pre-WordPiece), counted per FIELD at raw frequency. Which field
+        // matters more is a query-time question — BM25F normalizes each
+        // field by its own length before the weights apply, and neither
+        // the lengths nor the weights are known here.
         // keyword_words only emits alphanumeric runs, so no filter here.
-        let mut tf: HashMap<String, u16> = HashMap::new();
-        let mut count_words = |text: &str, weight: u16| {
+        let mut tf: HashMap<String, FieldTf> = HashMap::new();
+        let mut count_words = |text: &str, field: Field| {
             let norm = Vocab::normalize(text);
             for w in keyword_words(&norm) {
-                let e = tf.entry(w.to_string()).or_insert(0);
-                *e = e.saturating_add(weight);
+                tf.entry(w.to_string()).or_default().add(field);
             }
         };
-        count_words(&title, cfg.title_weight);
+        count_words(&title, Field::Title);
         for tag in &fm.tags {
-            count_words(tag, cfg.tag_weight);
+            count_words(tag, Field::Tag);
         }
-        count_words(&prose, 1);
+        count_words(&prose, Field::Body);
         doc_words.push(tf);
 
         // Synthetic chunk 0: title + tags. Body chunks never contain the
@@ -643,20 +723,31 @@ fn build(cfg: &Config, runtime: bool) -> Result<()> {
     let (data_i8, scales) = quantize_rows(&rows, dim);
 
     // ---- 6. Keyword postings ------------------------------------------
-    let mut postings: HashMap<String, Vec<(u16, u16)>> = HashMap::new();
+    let mut postings: HashMap<String, Vec<Posting>> = HashMap::new();
     for (doc_id, tf) in doc_words.iter().enumerate() {
-        for (term, &f) in tf {
-            postings
-                .entry(term.clone())
-                .or_default()
-                .push((doc_id as u16, f));
+        for (term, f) in tf {
+            postings.entry(term.clone()).or_default().push(Posting {
+                doc: doc_id as u16,
+                title: f.title,
+                tag: f.tag,
+                body: f.body,
+            });
         }
     }
-    let mut terms: Vec<(String, Vec<(u16, u16)>)> = postings.into_iter().collect();
+    let mut terms: Vec<(String, Vec<Posting>)> = postings.into_iter().collect();
     terms.sort_by(|a, b| a.0.cmp(&b.0)); // byte-stable output
     for (_, p) in &mut terms {
-        p.sort_unstable();
+        // By doc id: Posting has no Ord (the other three fields have no
+        // meaningful order), and doc id is the only key the reader cares
+        // about anyway.
+        p.sort_unstable_by_key(|p| p.doc);
     }
+    eprintln!(
+        "keyword: {} terms, BM25F weights title {:.2}, tag {:.2}",
+        terms.len(),
+        cfg.title_weight,
+        cfg.tag_weight
+    );
 
     // ---- 7. Serialize --------------------------------------------------
     // Clamped: a config asking for more prefix rows than the model has
@@ -671,6 +762,10 @@ fn build(cfg: &Config, runtime: bool) -> Result<()> {
     let index = Index {
         dim: meta.dim,
         global_scale,
+        // Baked in so the browser scores with the site's configuration;
+        // eval and query can still override per run without a rebuild.
+        w_title: cfg.title_weight,
+        w_tag: cfg.tag_weight,
         docs,
         chunk_doc,
         chunk_vecs,
@@ -904,6 +999,30 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn field_counts_land_in_their_own_slots() {
+        // The builder's whole job on the keyword side: a term in the
+        // title and the body must arrive as two separate tfs, not one
+        // pre-multiplied number.
+        let mut tf = FieldTf::default();
+        tf.add(Field::Title);
+        tf.add(Field::Body);
+        tf.add(Field::Body);
+        assert_eq!(tf.title, 1);
+        assert_eq!(tf.tag, 0);
+        assert_eq!(tf.body, 2);
+    }
+
+    #[test]
+    fn field_counts_saturate() {
+        let mut tf = FieldTf {
+            body: u16::MAX,
+            ..Default::default()
+        };
+        tf.add(Field::Body);
+        assert_eq!(tf.body, u16::MAX, "must not wrap to zero");
     }
 
     #[test]
