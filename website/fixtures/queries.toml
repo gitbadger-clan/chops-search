@@ -1,18 +1,40 @@
-# Gate fixture for the chops-search docs corpus (19 docs). Runs at default
-# scoring (min_cos derived, chunk_penalty 0.02) with --fail-under 0.85.
+# Gate fixture for the chops-search docs corpus (19 docs). Every case here
+# passes TODAY; this file is the contract, not the wishlist.
 #
-# This file is the contract the engine meets TODAY. Aspirational cases and
-# reproductions of open engine issues live in fixtures/known-failures.toml,
-# annotated with their diagnoses; they run manually / non-gating. When an
-# engine fix lands, promote its case back here in the same PR.
+# MEASURED 2026-08-08 at --min-cos 0.34, chunk_penalty 0.02, w_title 2.00,
+# w_tag 4.00: 37/37 at recall@1. The nine cases that miss were demoted to
+# fixtures/known-failures.toml with their diagnoses, so a red gate here
+# means a regression rather than a known gap.
+#
+# NOTE: those runs pass --min-cos 0.34 explicitly, while the engine derives
+# 0.283 at dims=128. Until min_cos is persisted in index.bin, the gate and
+# the browser are scoring differently, and any --fail-under here gates a
+# configuration nobody actually runs. Fix that before trusting the number.
+#
+# GATING: with every case expected to pass, --fail-under 0.95 fails on two
+# flips and tolerates one. Tighten to 0.97 (any single flip is red) once
+# min_cos ships and the number stops moving for reasons unrelated to
+# ranking. Aspirational cases belong in known-failures.toml, never here
+# with a lowered threshold to accommodate them.
 #
 # Corpus notes that shape this fixture: topics deliberately span a how-to
 # and a reference page, so `expect` lists every page that legitimately
 # answers. The docs also QUOTE their own example queries ("sourdough
 # starter hydration" appears verbatim in two pages), so negatives were
 # checked word-by-word against the corpus.
+#
+# Coverage target: every indexed page is the primary expectation of at
+# least one case in this file OR in known-failures.toml. A page nothing
+# asks for is a page whose ranking can regress unnoticed. `chops-search
+# docs` lists all 19.
+#
+# Cases carrying a "was a known failure" note are regression tests for a
+# landed fix. If one flips back, read that note before diagnosing afresh.
 
 # ---------------------------------------------------------------- exact
+# Rare literal terms. The keyword engine must carry these; a miss here is
+# usually tokenization (compounds, symbols) rather than relevance.
+
 [[query]]
 q = "wasm-unsafe-eval"
 expect = ["/how-to/deploy-with-caching/", "/how-to/site-wide-search/"]
@@ -36,6 +58,9 @@ kind = "exact"
 
 [[query]]
 q = "Content-Range"
+# Was a miss until descriptions were indexed into the keyword body field.
+# Regression test for that: if it flips back, check what changed about
+# description indexing before suspecting the ranker.
 expect = ["/explanations/designed-degradation/"]
 kind = "exact"
 
@@ -51,7 +76,56 @@ q = "in_search_index"
 expect = ["/reference/indexing-rules/"]
 kind = "exact"
 
+[[query]]
+q = "data-chops-open"
+# Was a known failure: hyphenated identifiers split into parts and "chops"
+# is a corpus-wide stopword (df 19/19), so ranking went noise-driven.
+# Fixed by emitting compounds as whole terms alongside their parts. Kept
+# here as the regression test for that.
+expect = ["/how-to/site-wide-search/", "/reference/browser-runtime/"]
+kind = "exact"
+
+[[query]]
+q = "data-chops-clear"
+# The other half of the attribute contract, and the one that lives on two
+# pages rather than one. Same compound-tokenization path as above.
+expect = ["/reference/browser-runtime/", "/how-to/use-your-themes-search-ui/"]
+kind = "exact"
+
+[[query]]
+q = "elasticlunr"
+# Single occurrence in the whole corpus: maximum idf, no compound, no
+# prefix relatives. If this ever misses, the keyword side is broken in a
+# way no other case will show.
+expect = ["/tutorials/getting-started/"]
+kind = "exact"
+
+[[query]]
+q = "slugify.paths"
+expect = ["/reference/indexing-rules/"]
+kind = "exact"
+
+[[query]]
+q = "chunk_chars"
+expect = ["/reference/configuration/", "/reference/cli/"]
+kind = "exact"
+
+[[query]]
+q = "COMPLETE=zsh"
+# Pasted-from-the-docs shape: an equals sign, so no compound is emitted
+# and the two parts are scored separately. "zsh" is the discriminating
+# one; "complete" appears in unrelated prose ("complete vocab").
+expect = ["/how-to/shell-completion/"]
+kind = "exact"
+
 # ----------------------------------------------------------- paraphrase
+# Symptom and intent phrasing that shares little vocabulary with the
+# answer. The semantic engine must carry these; the keyword side should
+# be gated off rather than contributing stopword noise.
+#
+# Eight further paraphrase cases sit in known-failures.toml: this kind is
+# where all the open work is, and where the corpus is thinnest.
+
 [[query]]
 q = "works locally but broken after deploying"
 expect = ["/how-to/deploy-with-caching/", "/explanations/designed-degradation/"]
@@ -64,17 +138,15 @@ kind = "paraphrase"
 
 [[query]]
 q = "how much do visitors have to download"
+# Passes on deploy-with-caching rather than range-fetched-model. Both are
+# listed and both are honest: the deployment page's "what a healthy deploy
+# looks like" aside is about per-query bytes.
 expect = ["/explanations/range-fetched-model/", "/how-to/deploy-with-caching/"]
 kind = "paraphrase"
 
 [[query]]
 q = "nonsense queries come back with junk results"
 expect = ["/explanations/hybrid-ranking/", "/reference/queries-toml/", "/tutorials/evaluate-your-search/"]
-kind = "paraphrase"
-
-[[query]]
-q = "rebuild automatically when i publish a post"
-expect = ["/how-to/reindex-in-ci/"]
 kind = "paraphrase"
 
 [[query]]
@@ -87,9 +159,58 @@ q = "prove a change didn't make results worse"
 expect = ["/tutorials/evaluate-your-search/", "/how-to/reindex-in-ci/", "/explanations/designed-degradation/"]
 kind = "paraphrase"
 
+[[query]]
+q = "shrink vectors to save bandwidth"
+# Was a known failure: reindex-in-ci won on the term frequency of
+# "Save"/"save" inside its YAML step names. Candidate engine fix
+# (code_weight < 1 for fenced blocks) is still open; the case passes now,
+# so it gates. If it flips back, that fix is the reason to build.
+expect = ["/how-to/manage-the-model/", "/reference/configuration/", "/explanations/range-fetched-model/"]
+kind = "paraphrase"
+
+[[query]]
+q = "will the build tool and the browser split words the same way"
+# Reworded 2026-08-08. The original ("the indexer and the browser disagree
+# about words") handed the distinctive word "indexer" to indexing-rules,
+# whose first sentence is "The indexer reads Zola's TOML front matter".
+# That was a fixture bug reading as a ranking bug: the case tested whether
+# one page had monopolised a word, not whether the engine understood the
+# question.
+expect = ["/explanations/one-tokenizer/"]
+kind = "paraphrase"
+
+[[query]]
+q = "use my own dialog instead of the built in one"
+expect = ["/how-to/use-your-themes-search-ui/", "/how-to/site-wide-search/"]
+kind = "paraphrase"
+
+[[query]]
+q = "finish my command when i hit tab"
+expect = ["/how-to/shell-completion/"]
+kind = "paraphrase"
+
+[[query]]
+q = "check quality before shipping a release"
+expect = ["/tutorials/evaluate-your-search/", "/how-to/reindex-in-ci/"]
+kind = "paraphrase"
+
+[[query]]
+q = "which files land in the deployed site"
+expect = ["/reference/artifacts/", "/how-to/deploy-with-caching/"]
+kind = "paraphrase"
+
 # --------------------------------------------------------- navigational
+# Typing toward a page you know exists. These lean on title and tag
+# fields, so they are the cases that move when the BM25F weights move.
+# All nine pass; this kind went to 100% when BM25F replaced the
+# pre-multiplied weight scheme.
+
 [[query]]
 q = "install"
+# Passes on getting-started rather than the install how-to. Both are
+# listed and both are honest for a one-word query, but note the shape: the
+# hub page wins here too. If this case is ever narrowed to the how-to
+# alone, expect it to fail for the same reason three paraphrase cases do.
 expect = ["/how-to/install/", "/tutorials/getting-started/"]
 kind = "navigational"
 
@@ -98,68 +219,85 @@ q = "queries.toml"
 expect = ["/reference/queries-toml/", "/tutorials/evaluate-your-search/"]
 kind = "navigational"
 
+[[query]]
+q = "getting started"
+# Was a known failure: a short page mentioning the phrase outranked the
+# page titled with it, the title-weight versus length-normalisation
+# interaction. Fixed by BM25F (per-field length normalisation). This is
+# the regression test for that fix.
+expect = ["/tutorials/getting-started/"]
+kind = "navigational"
+
+[[query]]
+q = "cli"
+# Same title-weight/length-norm interaction as "getting started".
+expect = ["/reference/cli/"]
+kind = "navigational"
+
+[[query]]
+q = "artifacts"
+# "artifacts" appears in five pages as prose, and is a title in exactly
+# one. Precisely the discrimination BM25F's title field exists to make.
+expect = ["/reference/artifacts/"]
+kind = "navigational"
+
+[[query]]
+q = "configuration"
+expect = ["/reference/configuration/"]
+kind = "navigational"
+
+[[query]]
+q = "indexing rules"
+expect = ["/reference/indexing-rules/"]
+kind = "navigational"
+
+[[query]]
+q = "browser runtime"
+expect = ["/reference/browser-runtime/"]
+kind = "navigational"
+
+[[query]]
+q = "shell completion"
+# The how-to is the target; cli.md documents the `completions` subcommand
+# and is a legitimate answer rather than a padded one.
+expect = ["/how-to/shell-completion/", "/reference/cli/"]
+kind = "navigational"
+
 # ----------------------------------------------------- negative control
 # Checked word-by-word against the corpus. NOT usable here: "sourdough"
 # (quoted as an example in two pages); "patterns"/"plan"/"budget" appear in
-# prose. A second negative lives in known-failures.toml until the floor
-# calibration and prefix-as-sole-evidence issues land.
+# prose. Re-check any new negative with `chops-search query` before adding
+# it: a negative that quietly matches one corpus word stops testing the
+# floor and starts testing BM25, which is a different thing passing for
+# the wrong reason.
+#
+# All four pass, but see the min_cos note at the top of this file: they
+# pass at 0.34, and the engine derives 0.283. These are the cases most
+# likely to flip when the gate starts measuring what ships.
+
 [[query]]
 q = "espresso grinder burrs"
 expect = []
 kind = "negative"
 
 [[query]]
-q = "data-chops-open"
-# ISSUE: compound tokenization. Hyphenated identifiers split into parts;
-# "chops" is a corpus-wide stopword (df 19/19), so ranking is noise-driven.
-# Fix: index hyphen/underscore compounds as both parts AND whole token.
-expect = ["/how-to/site-wide-search/", "/reference/browser-runtime/"]
-kind = "exact"
-
-[[query]]
-q = "getting started"
-# ISSUE: title weight vs BM25 length normalisation. A short page that
-# mentions the phrase outranks the page titled with it. Candidate fix:
-# title_weight default, or tags on docs pages. Also flips with
-# title_weight = 4 (content-side change, not an engine fix).
-expect = ["/tutorials/getting-started/"]
-kind = "navigational"
-
-[[query]]
-q = "cli"
-# ISSUE: same title-weight/length-norm interaction as "getting started".
-expect = ["/reference/cli/"]
-kind = "navigational"
-
-[[query]]
-q = "a page i wrote never shows up"
-# ASPIRATIONAL: maximally colloquial symptom phrasing with almost no
-# content words. Docs-side fix available too: indexing-rules could open
-# with the symptom in the user's vocabulary.
-expect = ["/reference/indexing-rules/", "/tutorials/evaluate-your-search/"]
-kind = "paraphrase"
-
-[[query]]
-q = "stopped understanding meaning, only matches literal words now"
-# ASPIRATIONAL: symptom-language paraphrase for keyword-only degradation.
-# Docs-side fix available: designed-degradation could state the symptom
-# as a visitor experiences it.
-expect = ["/explanations/designed-degradation/", "/reference/browser-runtime/"]
-kind = "paraphrase"
-
-[[query]]
-q = "shrink vectors to save bandwidth"
-# ISSUE: fenced-code keyword pollution. reindex-in-ci wins on the term
-# frequency of "Save"/"save" inside its YAML step names. Fix: code_weight
-# (< 1) for fenced-block content, like title_weight but downward.
-expect = ["/how-to/manage-the-model/", "/reference/configuration/", "/explanations/range-fetched-model/"]
-kind = "paraphrase"
-
-[[query]]
 q = "toddler bedtime routine"
-# ISSUE(S): floor calibration (noise cosines clear the derived floor at
-# dims=128) and prefix-as-sole-evidence ("routine" prefix-matches
-# "routinely" in site-wide-search and surfaces a result on that alone).
+# Was a known failure on two counts: floor calibration (noise cosines
+# cleared the derived floor at dims=128) and prefix-as-sole-evidence
+# ("routine" prefix-matches "routinely" in site-wide-search). Held by the
+# keyword confidence gate plus the raised min_cos. The most fragile
+# negative in the set, and therefore the most informative.
 expect = []
 kind = "negative"
 
+[[query]]
+q = "bicycle chain lubricant"
+# "toolchain" is one token, not "chain", so nothing here matches. Trailing
+# word has no prefix relatives in the corpus either.
+expect = []
+kind = "negative"
+
+[[query]]
+q = "orchid repotting schedule"
+expect = []
+kind = "negative"

@@ -8,35 +8,73 @@
 # back into fixtures/queries.toml in the same PR. These cases are the
 # acceptance tests for the issues they cite; do not "fix" them by blessing
 # the current noise winners in `expect`.
+#
+# Every case records what wins instead, as of the date noted. A case that
+# starts failing for a NEW reason is a different bug wearing the same red
+# text, and without the winner written down there is no way to see that.
+#
+# Promoted out on 2026-08-08 (fixed, now gating in queries.toml):
+# "data-chops-open" (compound tokenization), "getting started" and "cli"
+# (title weight vs length normalisation, fixed by BM25F), "shrink vectors
+# to save bandwidth", "toddler bedtime routine", "Content-Range".
 
 [[query]]
-q = "data-chops-open"
-# ISSUE: compound tokenization. Hyphenated identifiers split into parts;
-# "chops" is a corpus-wide stopword (df 19/19), so ranking is noise-driven.
-# Fix: index hyphen/underscore compounds as both parts AND whole token.
-expect = ["/how-to/site-wide-search/", "/reference/browser-runtime/"]
+q = "model2vec-rs"
+# ISSUE: RRF ordering. Keyword ranks one-tokenizer #1 on a df-1 compound;
+# semantic ranks manage-the-model #1 (its description says "verify the
+# model2vec model"), and fusion prefers the semantic winner because
+# 1/(60+2) + 1/(60+1) > 1/(60+1) + 1/(60+3). Backwards for an exact query,
+# and unfixable by field weights or the floor: the inputs are ranks and
+# both engines are correct. Fix: weighted RRF, keyword list scaled by
+# kw_confidence. Wins 2026-08-08: /how-to/manage-the-model/ (expected #2).
+expect = ["/explanations/one-tokenizer/"]
 kind = "exact"
 
 [[query]]
-q = "getting started"
-# ISSUE: title weight vs BM25 length normalisation. A short page that
-# mentions the phrase outranks the page titled with it. Candidate fix:
-# title_weight default, or tags on docs pages. Also flips with
-# title_weight = 4 (content-side change, not an engine fix).
-expect = ["/tutorials/getting-started/"]
-kind = "navigational"
+q = "what should i commit and what should i ignore"
+# ISSUE: RRF ordering, probably the same one. Neither "commit" nor
+# "ignore" appears on the winner, so the semantic side is ranking a page
+# it should not and the keyword side fails to outvote it. Verify with
+# `chops-search query` when weighted RRF lands: if the keyword list
+# already had manage-the-model first, this comes along for free.
+# Wins 2026-08-08: /explanations/designed-degradation/ (expected #2).
+expect = ["/how-to/manage-the-model/", "/how-to/reindex-in-ci/", "/tutorials/getting-started/"]
+kind = "paraphrase"
 
 [[query]]
-q = "cli"
-# ISSUE: same title-weight/length-norm interaction as "getting started".
-expect = ["/reference/cli/"]
-kind = "navigational"
+q = "make the download smaller for visitors"
+# ISSUE: mention versus answer. getting-started says "about 30 MB, once"
+# and "one-time 30 MB model download", so it is genuinely about a large
+# download; it just never says how to shrink one. No available ranking
+# signal separates a page that mentions a subject from one that answers
+# about it. chunk_penalty is the nearest candidate and cannot reach: at
+# 132 chunks over 19 docs the per-doc counts are too uniform for the
+# sqrt(2 ln n) differential to matter (0.009 of cosine at coeff 0.02).
+# Wins 2026-08-08: /tutorials/getting-started/ (expected #3).
+expect = ["/how-to/manage-the-model/", "/explanations/range-fetched-model/"]
+kind = "paraphrase"
+
+[[query]]
+q = "hide a page from the results"
+# ISSUE: retrieval, not ordering. The expected page is not in the top 3 at
+# all, so weighted RRF will not help. Every content word is corpus-common
+# ("page", "results") except "hide", which appears nowhere in the corpus,
+# so the keyword side has nothing discriminating and the semantic side
+# matches a generic sentence against the page with a chunk near
+# everything. Docs-side fix available: indexing-rules could state the
+# intent in the reader's vocabulary ("keep a page out of search results"),
+# a question it answers but never asks.
+# Wins 2026-08-08: /tutorials/getting-started/.
+expect = ["/reference/indexing-rules/"]
+kind = "paraphrase"
 
 [[query]]
 q = "a page i wrote never shows up"
 # ASPIRATIONAL: maximally colloquial symptom phrasing with almost no
 # content words. Docs-side fix available too: indexing-rules could open
-# with the symptom in the user's vocabulary.
+# with the symptom in the user's vocabulary. Near-duplicate of "hide a
+# page from the results" above; if one is fixed by content the other
+# probably follows, so treat them as one acceptance test in two registers.
 expect = ["/reference/indexing-rules/", "/tutorials/evaluate-your-search/"]
 kind = "paraphrase"
 
@@ -44,22 +82,50 @@ kind = "paraphrase"
 q = "stopped understanding meaning, only matches literal words now"
 # ASPIRATIONAL: symptom-language paraphrase for keyword-only degradation.
 # Docs-side fix available: designed-degradation could state the symptom
-# as a visitor experiences it.
+# as a visitor experiences it. Unverified since descriptions began being
+# indexed into the keyword body field; re-run before citing it.
 expect = ["/explanations/designed-degradation/", "/reference/browser-runtime/"]
 kind = "paraphrase"
 
 [[query]]
-q = "shrink vectors to save bandwidth"
-# ISSUE: fenced-code keyword pollution. reindex-in-ci wins on the term
-# frequency of "Save"/"save" inside its YAML step names. Fix: code_weight
-# (< 1) for fenced-block content, like title_weight but downward.
-expect = ["/how-to/manage-the-model/", "/reference/configuration/", "/explanations/range-fetched-model/"]
+q = "rebuild automatically when i publish a post"
+# ISSUE: sense collision. range-fetched-model says "a content rebuild
+# touches index.bin", using the query's most distinctive word in the
+# cache-invalidation sense rather than the CI sense, and BM25 cannot tell
+# senses apart. The correct page is titled "Reindex on every push" and
+# shares almost no vocabulary with the query: reindex/push/workflow
+# against rebuild/publish/post. Engine-side this wants synonyms or query
+# expansion, which is a far larger project than it is worth here; the
+# content fix (state the trigger in the user's words) is the likely one.
+# Wins 2026-08-08: /explanations/range-fetched-model/ (expected #2).
+expect = ["/how-to/reindex-in-ci/"]
 kind = "paraphrase"
 
 [[query]]
-q = "toddler bedtime routine"
-# ISSUE(S): floor calibration (noise cosines clear the derived floor at
-# dims=128) and prefix-as-sole-evidence ("routine" prefix-matches
-# "routinely" in site-wide-search and surfaces a result on that alone).
-expect = []
-kind = "negative"
+q = "does typing in the box send anything to a server"
+# CORPUS GAP, not an engine issue. The sentence that answers this ("no
+# search server, no API key, no request leaves the page except range
+# fetches against static files") lives in _index.md, which is skipped as a
+# section page. Meanwhile getting-started contains both "box" ("a working
+# search box") and "server" ("not the dev server"), so BM25 has two real
+# matches for a question it does not answer. This is the gap
+# reference/indexing-rules documents under "Documented gaps", found by the
+# corpus's own eval. Resolve deliberately: move the privacy claim onto
+# range-fetched-model.md because the docs are better for it, or delete
+# this case. Do not move it merely to turn the case green.
+# Wins 2026-08-08: /tutorials/getting-started/, neither expected page top 3.
+expect = ["/explanations/range-fetched-model/", "/reference/browser-runtime/"]
+kind = "paraphrase"
+
+[[query]]
+q = "see why one result beat another"
+# FIXTURE, probably: queries-toml's scoring section is about reading
+# recall numbers and per-kind breakdowns, which is "see why the SET scored
+# what it did" rather than "see why one result beat another". The
+# distinction is real but fine, and a reader landing on queries-toml would
+# not feel badly served. Parked here rather than in the gate until that is
+# decided: either add queries-toml to `expect` and accept a softer case,
+# or keep it strict as an ordering failure for the `query` command's own
+# documentation. Wins 2026-08-08: /reference/queries-toml/ (expected #2, #3).
+expect = ["/explanations/hybrid-ranking/", "/tutorials/evaluate-your-search/", "/reference/cli/"]
+kind = "paraphrase"
