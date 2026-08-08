@@ -91,12 +91,13 @@ pub struct SearchReport {
     /// Typed words that matched no corpus term (and, for the trailing
     /// word, produced no expansions either).
     pub unmatched: Vec<Box<str>>,
-    /// Mean field lengths BM25F normalized against. Three numbers, not
+    /// Mean field lengths BM25F normalized against. Four numbers, not
     /// one: a title hit's score only makes sense against the average
     /// title, and explain has to be able to show that a 4-word title in
     /// a corpus averaging 6 was the reason a doc won.
     pub avg_title: f32,
     pub avg_tag: f32,
+    pub avg_desc: f32,
     pub avg_body: f32,
     pub kw_confidence: f32,
     pub kw_gated: bool,
@@ -139,7 +140,7 @@ impl Engine {
             chunk_counts[d] += 1;
         }
         // Read off `index` before it moves into the struct literal below.
-        let (w_title, w_tag) = (index.w_title, index.w_tag);
+        let weights = index.weights;
         Ok(Engine {
             vocab,
             store,
@@ -163,8 +164,7 @@ impl Engine {
             // way the browser can learn what chops-search.toml said.
             opts: crate::score::ScoreOpts {
                 min_cos: crate::score::min_cos_for(dim),
-                w_title,
-                w_tag,
+                weights,
                 ..Default::default()
             },
         })
@@ -247,9 +247,7 @@ impl Engine {
         // evidence that WAS suppressed, which is the diagnostic point.
         // Weights come from opts, not from the index, so an eval sweep
         // re-ranks without rebuilding.
-        let kw_scores = self
-            .kw
-            .score_terms(&terms, self.opts.w_title, self.opts.w_tag);
+        let kw_scores = self.kw.score_terms(&terms, self.opts.weights);
         let kw_ranked = if kw_gated {
             Vec::new()
         } else {
@@ -357,6 +355,7 @@ impl Engine {
             unmatched,
             avg_title: self.kw.avg_title,
             avg_tag: self.kw.avg_tag,
+            avg_desc: self.kw.avg_desc,
             avg_body: self.kw.avg_body,
             kw_confidence,
             kw_gated,

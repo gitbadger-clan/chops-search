@@ -42,6 +42,8 @@
 //! would let a long document's penalty push it below the relevance floor,
 //! which is a different claim than the penalty is licensed to make.
 
+use crate::keyword::FieldWeights;
+
 /// Minimum raw best-chunk similarity for a document to count as
 /// semantically relevant. Calibrated at the model's native 256 dims,
 /// where on-topic queries score 0.29–0.45 and pure noise stays under
@@ -72,14 +74,17 @@ pub struct ScoreOpts {
     pub kw_confidence: f32,
     pub min_gap: f32,
     pub strong_cos: f32,
-    /// BM25F field weights: what a length-normalized title or tag
-    /// occurrence is worth against a body occurrence (body is fixed at
-    /// 1.0). Defaults come from `keyword::W_TITLE`/`W_TAG`, but the
-    /// engine overwrites them from `index.bin` at construction, since the
-    /// values a corpus was built with belong with the corpus. Sweep with
-    /// `chops-search eval --w-title/--w-tag`.
-    pub w_title: f32,
-    pub w_tag: f32,
+    /// BM25F field weights: what a length-normalized title, tag, or
+    /// description occurrence is worth against a body occurrence (body is
+    /// fixed at 1.0). Defaults come from `keyword`, but the engine
+    /// overwrites them from `index.bin` at construction, since the values
+    /// a corpus was built with belong with the corpus. Sweep with
+    /// `chops-search eval --w-title/--w-tag/--w-desc`.
+    ///
+    /// One struct rather than three fields, because three consecutive f32
+    /// parameters is where a transposition compiles, type-checks, and
+    /// shows up only as "ranking got slightly worse".
+    pub weights: FieldWeights,
 }
 
 /// A ranked document plus the chunk that earned it its score — the chunk
@@ -111,8 +116,7 @@ impl Default for ScoreOpts {
             kw_confidence: KW_CONFIDENCE,
             min_gap: 0.0,
             strong_cos: f32::INFINITY,
-            w_title: crate::keyword::W_TITLE,
-            w_tag: crate::keyword::W_TAG,
+            weights: FieldWeights::default(),
         }
     }
 }
@@ -133,8 +137,7 @@ impl ScoreOpts {
             kw_confidence: 0.0,
             min_gap: 0.0,
             strong_cos: f32::INFINITY,
-            w_title: crate::keyword::W_TITLE,
-            w_tag: crate::keyword::W_TAG,
+            weights: FieldWeights::default(),
         }
     }
 }
@@ -458,9 +461,32 @@ mod tests {
         // A raw() that zeroed the weights would make the eval baseline a
         // body-only scorer and quietly overstate what BM25F bought.
         let raw = ScoreOpts::raw();
-        assert_eq!(raw.w_title, crate::keyword::W_TITLE);
-        assert_eq!(raw.w_tag, crate::keyword::W_TAG);
-        assert_eq!(raw.w_title, ScoreOpts::default().w_title);
-        assert_eq!(raw.w_tag, ScoreOpts::default().w_tag);
+        assert_eq!(raw.weights, FieldWeights::default());
+        assert_eq!(raw.weights, ScoreOpts::default().weights);
+    }
+
+    #[test]
+    fn weights_are_independent_fields() {
+        // Grouping them in a struct is packaging, not coupling: each
+        // weight still lands on its own field's normalized tf, and
+        // overriding one leaves the others where the index put them.
+        let base = ScoreOpts {
+            weights: FieldWeights {
+                title: 3.0,
+                tag: 7.0,
+                desc: 0.5,
+            },
+            ..Default::default()
+        };
+        let swept = ScoreOpts {
+            weights: FieldWeights {
+                desc: 0.0,
+                ..base.weights
+            },
+            ..base
+        };
+        assert_eq!(swept.weights.title, 3.0);
+        assert_eq!(swept.weights.tag, 7.0);
+        assert_eq!(swept.weights.desc, 0.0);
     }
 }

@@ -39,6 +39,11 @@ struct Tally {
 /// starting from ScoreOpts::default() would reset the floor to its
 /// 256-dim value and the weights to the compiled-in defaults on a run
 /// that overrides only one other field.
+///
+/// Flat `Option<f32>` fields rather than an `Option<FieldWeights>`: these
+/// map one-to-one onto CLI flags, each is independently overridable, and
+/// clap names them, so the transposition hazard that justifies the struct
+/// inside the engine does not exist here.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ScoreArgs {
     pub min_cos: Option<f32>,
@@ -48,6 +53,7 @@ pub struct ScoreArgs {
     pub strong_cos: Option<f32>,
     pub w_title: Option<f32>,
     pub w_tag: Option<f32>,
+    pub w_desc: Option<f32>,
 }
 
 impl ScoreArgs {
@@ -68,11 +74,18 @@ impl ScoreArgs {
         if let Some(v) = self.strong_cos {
             o.strong_cos = v;
         }
+        // Mutated in place rather than rebuilding the struct: overriding
+        // one weight must leave the other two exactly as index.bin set
+        // them, and a `FieldWeights { title: v, ..Default::default() }`
+        // here would quietly reset the others to the compiled-in values.
         if let Some(v) = self.w_title {
-            o.w_title = v;
+            o.weights.title = v;
         }
         if let Some(v) = self.w_tag {
-            o.w_tag = v;
+            o.weights.tag = v;
+        }
+        if let Some(v) = self.w_desc {
+            o.weights.desc = v;
         }
         o
     }
@@ -86,11 +99,12 @@ impl ScoreArgs {
     /// every other knob disables at zero.
     pub fn describe(o: &ScoreOpts) -> String {
         format!(
-            "kw_floor {:.2}, w_title {:.2}, w_tag {:.2}, \
+            "kw_floor {:.2}, w_title {:.2}, w_tag {:.2}, w_desc {:.2}, \
              min_cos {:.2}, chunk_penalty {:.3}, min_gap {:.2}, strong_cos {}",
             o.kw_confidence,
-            o.w_title,
-            o.w_tag,
+            o.weights.title,
+            o.weights.tag,
+            o.weights.desc,
             o.min_cos,
             o.chunk_penalty,
             o.min_gap,
@@ -374,6 +388,7 @@ fn load_cases(path: &Path, kind_filter: Option<&str>) -> Result<Vec<Case>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chops_search_core::keyword::FieldWeights;
 
     /// A base that resembles what an engine hands over: nothing at its
     /// compiled-in default, so any field apply() forgets shows up.
@@ -384,8 +399,11 @@ mod tests {
             kw_confidence: 0.25,
             min_gap: 0.11,
             strong_cos: 0.55,
-            w_title: 3.0,
-            w_tag: 7.0,
+            weights: FieldWeights {
+                title: 3.0,
+                tag: 7.0,
+                desc: 0.5,
+            },
         }
     }
 
@@ -401,8 +419,7 @@ mod tests {
         assert_eq!(o.kw_confidence, b.kw_confidence);
         assert_eq!(o.min_gap, b.min_gap);
         assert_eq!(o.strong_cos, b.strong_cos);
-        assert_eq!(o.w_title, b.w_title);
-        assert_eq!(o.w_tag, b.w_tag);
+        assert_eq!(o.weights, b.weights);
     }
 
     #[test]
@@ -412,9 +429,47 @@ mod tests {
             ..Default::default()
         };
         let o = args.apply(base());
-        assert_eq!(o.w_title, 0.0, "zero is a real sweep point, not unset");
-        assert_eq!(o.w_tag, 7.0);
+        assert_eq!(o.weights.title, 0.0, "zero is a real sweep point");
+        assert_eq!(o.weights.tag, 7.0, "sibling weights must survive");
+        assert_eq!(o.weights.desc, 0.5, "sibling weights must survive");
         assert_eq!(o.min_cos, 0.34, "the index-derived floor must survive");
+    }
+
+    #[test]
+    fn each_weight_overrides_only_itself() {
+        // Three same-typed flags landing on three same-typed fields is
+        // exactly where a copy-paste error hides. Set each in turn and
+        // assert the other two are untouched.
+        let cases = [
+            (
+                ScoreArgs {
+                    w_title: Some(9.0),
+                    ..Default::default()
+                },
+                (9.0, 7.0, 0.5),
+            ),
+            (
+                ScoreArgs {
+                    w_tag: Some(9.0),
+                    ..Default::default()
+                },
+                (3.0, 9.0, 0.5),
+            ),
+            (
+                ScoreArgs {
+                    w_desc: Some(9.0),
+                    ..Default::default()
+                },
+                (3.0, 7.0, 9.0),
+            ),
+        ];
+        for (args, (title, tag, desc)) in cases {
+            let o = args.apply(base());
+            assert_eq!(
+                (o.weights.title, o.weights.tag, o.weights.desc),
+                (title, tag, desc)
+            );
+        }
     }
 
     #[test]
@@ -424,6 +479,7 @@ mod tests {
             "kw_floor",
             "w_title",
             "w_tag",
+            "w_desc",
             "min_cos",
             "chunk_penalty",
             "min_gap",

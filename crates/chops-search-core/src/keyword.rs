@@ -1,5 +1,5 @@
-//! Minimal keyword engine: BM25F over title/tag/body fields, with prefix
-//! expansion on the term the user is still typing.
+//! Minimal keyword engine: BM25F over title/tag/desc/body fields, with
+//! prefix expansion on the term the user is still typing.
 //!
 //! This is the exact-token half of the hybrid — the one that nails `pydub`
 //! when the vector side shatters it into subword confetti. It indexes the
@@ -22,6 +22,14 @@
 //! body), the normalized tfs are combined with the field weights, and
 //! saturation applies ONCE to the combined value. Weights bias, they no
 //! longer inflate.
+//!
+//! FOUR FIELDS, not three. `desc` (Zola's front-matter description) was
+//! briefly counted as body, which worked but had two defects. It inflated
+//! `dl_body`, so writing a fuller description quietly discounted every
+//! other term on the page; and it made "should descriptions count on this
+//! corpus?" a rebuild rather than a flag. Measured on the docs corpus the
+//! two arrangements score the same, so this field is here for those two
+//! properties, not for recall.
 //!
 //! PREFIX EXPANSION. In an as-you-type box, a query is a complete phrase
 //! plus one half-typed word. Scoring that last word exactly means
@@ -54,15 +62,60 @@ use std::collections::HashMap;
 pub const K1: f32 = 1.2;
 pub const B: f32 = 0.75;
 
-/// Default BM25F field weights: what a length-normalized title/tag
-/// occurrence is worth relative to a body occurrence (body is fixed at
-/// 1.0 — weights are relative, so two knobs, not three). Applied AFTER
-/// per-field normalization and BEFORE saturation. These mirror the old
-/// config defaults in intent, but they are not the same quantity as the
-/// pre-multiplied tf weights they replace — sweep with
-/// `chops-search eval --w-title/--w-tag` before trusting them.
+/// Default BM25F field weights: what a length-normalized occurrence in
+/// each field is worth relative to a body occurrence (body is fixed at
+/// 1.0 — weights are relative, so three knobs, not four). Applied AFTER
+/// per-field normalization and BEFORE saturation.
+///
+/// W_TITLE and W_TAG mirror the old config defaults in intent, but they
+/// are not the same quantity as the pre-multiplied tf weights they
+/// replaced; sweep with `chops-search eval --w-title/--w-tag` before
+/// trusting them.
+///
+/// W_DESC is 1.0 deliberately: at parity with body it reproduces the
+/// scoring that descriptions had when they were counted as body terms,
+/// so introducing the field is a refactor with a measurable claim rather
+/// than a tuning change smuggled in beside it. Sweep it separately.
 pub const W_TITLE: f32 = 2.0;
 pub const W_TAG: f32 = 4.0;
+pub const W_DESC: f32 = 1.0;
+
+/// The three weights as one value. Passing them as loose `f32`
+/// parameters put three same-typed arguments in a row, where a
+/// transposition compiles, passes every type check, and shows up only as
+/// "ranking got a bit worse". One struct makes that unrepresentable.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FieldWeights {
+    pub title: f32,
+    pub tag: f32,
+    pub desc: f32,
+}
+
+impl Default for FieldWeights {
+    fn default() -> Self {
+        FieldWeights {
+            title: W_TITLE,
+            tag: W_TAG,
+            desc: W_DESC,
+        }
+    }
+}
+
+impl FieldWeights {
+    /// Whether these weights could have come from a legitimate build.
+    /// A NaN would silently NaN every score it touched; a negative would
+    /// make a field's presence count against the document. 0.0 is
+    /// legal and meaningful ("ignore this field"), which is what makes
+    /// the field sweepable. The ceiling is a sanity rail: past roughly
+    /// 100 the weighted field alone saturates the combined tf and the
+    /// other fields stop mattering, which is a mistake rather than a
+    /// strategy.
+    pub fn is_sane(&self) -> bool {
+        [self.title, self.tag, self.desc]
+            .iter()
+            .all(|w| w.is_finite() && (0.0..=100.0).contains(w))
+    }
+}
 
 /// Shortest trailing word that may expand. Two characters already matches
 /// far too much of an English vocabulary to be informative.
@@ -83,15 +136,17 @@ pub struct KeywordIndex {
     pub sorted: Vec<Box<str>>,
     /// Per-field lengths, derived at construction — never serialized.
     /// BM25F normalizes each field by its OWN length, which is the whole
-    /// reason the postings carry three tfs.
+    /// reason the postings carry four tfs.
     pub dl_title: Vec<f32>,
     pub dl_tag: Vec<f32>,
+    pub dl_desc: Vec<f32>,
     pub dl_body: Vec<f32>,
     /// Means, floored at 1 so every ratio is defined. Tags are commonly
-    /// absent on a whole corpus, so this floor is load-bearing, not
-    /// defensive.
+    /// absent on a whole corpus, and descriptions are optional in Zola,
+    /// so this floor is load-bearing, not defensive.
     pub avg_title: f32,
     pub avg_tag: f32,
+    pub avg_desc: f32,
     pub avg_body: f32,
 }
 
@@ -111,6 +166,7 @@ impl KeywordIndex {
         let n = n_docs as usize;
         let mut dl_title = vec![0f32; n];
         let mut dl_tag = vec![0f32; n];
+        let mut dl_desc = vec![0f32; n];
         let mut dl_body = vec![0f32; n];
         for postings in terms.values() {
             for p in postings {
@@ -120,6 +176,7 @@ impl KeywordIndex {
                 }
                 dl_title[d] += p.title as f32;
                 dl_tag[d] += p.tag as f32;
+                dl_desc[d] += p.desc as f32;
                 dl_body[d] += p.body as f32;
             }
         }
@@ -132,6 +189,7 @@ impl KeywordIndex {
         };
         let avg_title = avg(&dl_title);
         let avg_tag = avg(&dl_tag);
+        let avg_desc = avg(&dl_desc);
         let avg_body = avg(&dl_body);
         let mut sorted: Vec<Box<str>> = terms.keys().cloned().collect();
         sorted.sort_unstable();
@@ -141,9 +199,11 @@ impl KeywordIndex {
             sorted,
             dl_title,
             dl_tag,
+            dl_desc,
             dl_body,
             avg_title,
             avg_tag,
+            avg_desc,
             avg_body,
         }
     }
@@ -207,11 +267,12 @@ impl KeywordIndex {
     /// `chops-search query` reports the same numbers the ranker used —
     /// the duplicated formula in explain.rs drifted once already when
     /// BM25 landed.
-    pub fn term_score(&self, p: &Posting, idf: f32, w_title: f32, w_tag: f32) -> f32 {
+    pub fn term_score(&self, p: &Posting, idf: f32, w: FieldWeights) -> f32 {
         let d = p.doc as usize;
         let ntf = |tf: u16, dl: f32, avg: f32| tf as f32 / (1.0 - B + B * dl / avg);
-        let tfw = w_title * ntf(p.title, self.dl_title[d], self.avg_title)
-            + w_tag * ntf(p.tag, self.dl_tag[d], self.avg_tag)
+        let tfw = w.title * ntf(p.title, self.dl_title[d], self.avg_title)
+            + w.tag * ntf(p.tag, self.dl_tag[d], self.avg_tag)
+            + w.desc * ntf(p.desc, self.dl_desc[d], self.avg_desc)
             + ntf(p.body, self.dl_body[d], self.avg_body);
         idf * (tfw * (K1 + 1.0)) / (tfw + K1)
     }
@@ -295,7 +356,7 @@ impl KeywordIndex {
     ///
     /// The field weights come from the caller (the engine passes its
     /// ScoreOpts) so eval can sweep them without rebuilding the index.
-    pub fn score_terms(&self, terms: &[Term], w_title: f32, w_tag: f32) -> Vec<f32> {
+    pub fn score_terms(&self, terms: &[Term], w: FieldWeights) -> Vec<f32> {
         let mut scores = vec![0f32; self.n_docs as usize];
         for t in terms {
             let Some(postings) = self.terms.get(&t.text) else {
@@ -304,7 +365,7 @@ impl KeywordIndex {
             let idf = self.idf(postings.len());
             for p in postings {
                 if let Some(s) = scores.get_mut(p.doc as usize) {
-                    *s += t.weight * self.term_score(p, idf, w_title, w_tag);
+                    *s += t.weight * self.term_score(p, idf, w);
                 }
             }
         }
@@ -328,7 +389,7 @@ impl KeywordIndex {
     }
 
     pub fn rank_terms(&self, terms: &[Term]) -> Vec<u16> {
-        Self::rank_from_scores(&self.score_terms(terms, W_TITLE, W_TAG))
+        Self::rank_from_scores(&self.score_terms(terms, FieldWeights::default()))
     }
 }
 
@@ -438,17 +499,25 @@ mod tests {
             doc,
             title: 0,
             tag: 0,
+            desc: 0,
             body: tf,
         }
     }
 
-    fn post(doc: u16, title: u16, tag: u16, body: u16) -> Posting {
+    /// Field order matches the struct and the wire format, so a call site
+    /// reads the same as a hexdump.
+    fn post(doc: u16, title: u16, tag: u16, desc: u16, body: u16) -> Posting {
         Posting {
             doc,
             title,
             tag,
+            desc,
             body,
         }
+    }
+
+    fn w() -> FieldWeights {
+        FieldWeights::default()
     }
 
     /// Corpus shaped like the docs site: a term for everything common, a
@@ -533,8 +602,8 @@ mod tests {
         terms.insert(Box::from("pad"), vec![body(0, 97)]);
         let idx = KeywordIndex::new(2, terms);
         assert_eq!(idx.rank_exact(&["x"])[0], 1);
-        let s0 = idx.term_score(&body(0, 3), 1.0, W_TITLE, W_TAG);
-        let s1 = idx.term_score(&body(1, 100), 1.0, W_TITLE, W_TAG);
+        let s0 = idx.term_score(&body(0, 3), 1.0, w());
+        let s1 = idx.term_score(&body(1, 100), 1.0, w());
         assert!(s1 / s0 < 1.5, "saturation failed: {s1} vs {s0}");
     }
 
@@ -544,6 +613,7 @@ mod tests {
         assert!(idx.rank(&["anything"]).is_empty());
         assert_eq!(idx.avg_title, 1.0);
         assert_eq!(idx.avg_tag, 1.0);
+        assert_eq!(idx.avg_desc, 1.0);
         assert_eq!(idx.avg_body, 1.0);
     }
 
@@ -555,10 +625,13 @@ mod tests {
         // the doc that carries it in the TITLE wins. Both docs get a
         // 5-token title and a 20-token body so nothing rides on length.
         let mut terms: HashMap<Box<str>, Vec<Posting>> = HashMap::new();
-        terms.insert(Box::from("tasks"), vec![post(0, 1, 0, 0), post(1, 0, 0, 1)]);
+        terms.insert(
+            Box::from("tasks"),
+            vec![post(0, 1, 0, 0, 0), post(1, 0, 0, 0, 1)],
+        );
         terms.insert(
             Box::from("filler"),
-            vec![post(0, 4, 0, 20), post(1, 5, 0, 19)],
+            vec![post(0, 4, 0, 0, 20), post(1, 5, 0, 0, 19)],
         );
         let idx = KeywordIndex::new(2, terms);
         assert_eq!(idx.rank_exact(&["tasks"])[0], 0);
@@ -569,10 +642,13 @@ mod tests {
         // W_TAG (4) > W_TITLE (2): a tag is the author's own relevance
         // signal. Equal tf, equal per-field lengths.
         let mut terms: HashMap<Box<str>, Vec<Posting>> = HashMap::new();
-        terms.insert(Box::from("wasm"), vec![post(0, 0, 1, 0), post(1, 1, 0, 0)]);
+        terms.insert(
+            Box::from("wasm"),
+            vec![post(0, 0, 1, 0, 0), post(1, 1, 0, 0, 0)],
+        );
         terms.insert(
             Box::from("filler"),
-            vec![post(0, 3, 1, 10), post(1, 2, 2, 10)],
+            vec![post(0, 3, 1, 0, 10), post(1, 2, 2, 0, 10)],
         );
         let idx = KeywordIndex::new(2, terms);
         assert_eq!(idx.rank_exact(&["wasm"])[0], 0);
@@ -584,13 +660,16 @@ mod tests {
         // short title is more "about" the term. This is the per-field
         // normalization pre-multiplied weights could never express.
         let mut terms: HashMap<Box<str>, Vec<Posting>> = HashMap::new();
-        terms.insert(Box::from("go"), vec![post(0, 1, 0, 0), post(1, 1, 0, 0)]);
-        terms.insert(Box::from("pada"), vec![post(0, 1, 0, 0)]);
-        terms.insert(Box::from("padb"), vec![post(1, 9, 0, 0)]);
+        terms.insert(
+            Box::from("go"),
+            vec![post(0, 1, 0, 0, 0), post(1, 1, 0, 0, 0)],
+        );
+        terms.insert(Box::from("pada"), vec![post(0, 1, 0, 0, 0)]);
+        terms.insert(Box::from("padb"), vec![post(1, 9, 0, 0, 0)]);
         let idx = KeywordIndex::new(2, terms);
         assert_eq!(idx.dl_title, vec![2.0, 10.0]);
-        let s0 = idx.term_score(&post(0, 1, 0, 0), 1.0, W_TITLE, W_TAG);
-        let s1 = idx.term_score(&post(1, 1, 0, 0), 1.0, W_TITLE, W_TAG);
+        let s0 = idx.term_score(&post(0, 1, 0, 0, 0), 1.0, w());
+        let s1 = idx.term_score(&post(1, 1, 0, 0, 0), 1.0, w());
         assert!(
             s0 > s1,
             "short-title hit must outscore long-title: {s0} vs {s1}"
@@ -604,11 +683,14 @@ mod tests {
         // weighted, combined tf saturates against K1 as one quantity.
         // Equal dl_title (8) on both docs isolates the tf effect.
         let mut terms: HashMap<Box<str>, Vec<Posting>> = HashMap::new();
-        terms.insert(Box::from("x"), vec![post(0, 2, 0, 0), post(1, 8, 0, 0)]);
-        terms.insert(Box::from("pad"), vec![post(0, 6, 0, 0)]);
+        terms.insert(
+            Box::from("x"),
+            vec![post(0, 2, 0, 0, 0), post(1, 8, 0, 0, 0)],
+        );
+        terms.insert(Box::from("pad"), vec![post(0, 6, 0, 0, 0)]);
         let idx = KeywordIndex::new(2, terms);
-        let s0 = idx.term_score(&post(0, 2, 0, 0), 1.0, W_TITLE, W_TAG);
-        let s1 = idx.term_score(&post(1, 8, 0, 0), 1.0, W_TITLE, W_TAG);
+        let s0 = idx.term_score(&post(0, 2, 0, 0, 0), 1.0, w());
+        let s1 = idx.term_score(&post(1, 8, 0, 0, 0), 1.0, w());
         assert!(s1 > s0);
         assert!(
             s1 / s0 < 1.5,
@@ -618,13 +700,14 @@ mod tests {
 
     #[test]
     fn tagless_corpus_scores_without_incident() {
-        // avg_tag floors at 1.0 on a corpus with no tags anywhere; a
-        // zero tag tf contributes exactly nothing, and nothing NaNs.
+        // avg_tag and avg_desc floor at 1.0 on a corpus with neither; a
+        // zero tf contributes exactly nothing, and nothing NaNs.
         let mut terms: HashMap<Box<str>, Vec<Posting>> = HashMap::new();
-        terms.insert(Box::from("zola"), vec![post(0, 1, 0, 3)]);
+        terms.insert(Box::from("zola"), vec![post(0, 1, 0, 0, 3)]);
         let idx = KeywordIndex::new(1, terms);
         assert_eq!(idx.avg_tag, 1.0);
-        let s = idx.term_score(&post(0, 1, 0, 3), 1.0, W_TITLE, W_TAG);
+        assert_eq!(idx.avg_desc, 1.0);
+        let s = idx.term_score(&post(0, 1, 0, 0, 3), 1.0, w());
         assert!(s.is_finite() && s > 0.0);
         assert_eq!(idx.rank_exact(&["zola"]), vec![0]);
     }
@@ -635,17 +718,127 @@ mod tests {
         // property eval's --w-title sweep depends on. At w_title 0 a
         // title-only hit carries no evidence and the body hit wins.
         let mut terms: HashMap<Box<str>, Vec<Posting>> = HashMap::new();
-        terms.insert(Box::from("rrf"), vec![post(0, 1, 0, 0), post(1, 0, 0, 1)]);
+        terms.insert(
+            Box::from("rrf"),
+            vec![post(0, 1, 0, 0, 0), post(1, 0, 0, 0, 1)],
+        );
         terms.insert(
             Box::from("filler"),
-            vec![post(0, 4, 0, 20), post(1, 5, 0, 19)],
+            vec![post(0, 4, 0, 0, 20), post(1, 5, 0, 0, 19)],
         );
         let idx = KeywordIndex::new(2, terms);
         let t = idx.resolve(&["rrf"], false);
-        let default = KeywordIndex::rank_from_scores(&idx.score_terms(&t, W_TITLE, W_TAG));
-        let no_title = KeywordIndex::rank_from_scores(&idx.score_terms(&t, 0.0, W_TAG));
+        let default = KeywordIndex::rank_from_scores(&idx.score_terms(&t, w()));
+        let no_title = KeywordIndex::rank_from_scores(
+            &idx.score_terms(&t, FieldWeights { title: 0.0, ..w() }),
+        );
         assert_eq!(default[0], 0);
         assert_eq!(no_title[0], 1);
+    }
+
+    // ---- the description field ---------------------------------------
+
+    #[test]
+    fn description_length_does_not_discount_body_terms() {
+        // The defect that justified a fourth field. When descriptions were
+        // counted as body, a longer description inflated dl_body and so
+        // discounted every body term on that page: writing a fuller
+        // description made your own prose rank worse. Two docs with
+        // identical bodies and wildly different description lengths must
+        // score a body term identically.
+        let mut terms: HashMap<Box<str>, Vec<Posting>> = HashMap::new();
+        terms.insert(
+            Box::from("zola"),
+            vec![post(0, 0, 0, 0, 3), post(1, 0, 0, 0, 3)],
+        );
+        terms.insert(
+            Box::from("filler"),
+            vec![post(0, 0, 0, 0, 20), post(1, 0, 0, 0, 20)],
+        );
+        terms.insert(Box::from("shortdesc"), vec![post(0, 0, 0, 2, 0)]);
+        terms.insert(Box::from("longdesc"), vec![post(1, 0, 0, 40, 0)]);
+        let idx = KeywordIndex::new(2, terms);
+        assert_eq!(idx.dl_body, vec![23.0, 23.0]);
+        assert_eq!(idx.dl_desc, vec![2.0, 40.0]);
+        let s0 = idx.term_score(&post(0, 0, 0, 0, 3), 1.0, w());
+        let s1 = idx.term_score(&post(1, 0, 0, 0, 3), 1.0, w());
+        assert!(
+            (s0 - s1).abs() < 1e-6,
+            "description length leaked into body scoring: {s0} vs {s1}"
+        );
+    }
+
+    #[test]
+    fn description_normalizes_by_its_own_length() {
+        // The other half: a term in a 5-word description is stronger
+        // evidence than the same term in a 50-word one, and neither is
+        // measured against the body.
+        let mut terms: HashMap<Box<str>, Vec<Posting>> = HashMap::new();
+        terms.insert(
+            Box::from("wasm"),
+            vec![post(0, 0, 0, 1, 0), post(1, 0, 0, 1, 0)],
+        );
+        terms.insert(Box::from("pada"), vec![post(0, 0, 0, 4, 0)]);
+        terms.insert(Box::from("padb"), vec![post(1, 0, 0, 49, 0)]);
+        let idx = KeywordIndex::new(2, terms);
+        assert_eq!(idx.dl_desc, vec![5.0, 50.0]);
+        assert_eq!(idx.rank_exact(&["wasm"])[0], 0);
+    }
+
+    #[test]
+    fn desc_weight_defaults_to_body_parity() {
+        // Landing-neutral by construction: at 1.0 a description term is
+        // worth what it was worth when descriptions were body terms, so
+        // introducing the field is a refactor rather than a tuning
+        // change. Anything else here makes the two claims inseparable.
+        assert_eq!(FieldWeights::default().desc, 1.0);
+    }
+
+    #[test]
+    fn desc_weight_zero_removes_the_evidence() {
+        // The property the field exists for: "do descriptions earn their
+        // keep on this corpus" is a flag, not a rebuild.
+        let mut terms: HashMap<Box<str>, Vec<Posting>> = HashMap::new();
+        terms.insert(
+            Box::from("wasm"),
+            vec![post(0, 0, 0, 2, 0), post(1, 0, 0, 0, 1)],
+        );
+        terms.insert(
+            Box::from("filler"),
+            vec![post(0, 0, 0, 8, 5), post(1, 0, 0, 10, 5)],
+        );
+        let idx = KeywordIndex::new(2, terms);
+        let t = idx.resolve(&["wasm"], false);
+        assert_eq!(
+            KeywordIndex::rank_from_scores(&idx.score_terms(&t, w()))[0],
+            0
+        );
+        let off = FieldWeights { desc: 0.0, ..w() };
+        assert_eq!(
+            KeywordIndex::rank_from_scores(&idx.score_terms(&t, off)),
+            vec![1],
+            "at w_desc 0 the desc-only doc must carry no evidence at all"
+        );
+    }
+
+    #[test]
+    fn field_weights_sanity_check() {
+        assert!(FieldWeights::default().is_sane());
+        assert!(
+            FieldWeights {
+                title: 0.0,
+                tag: 0.0,
+                desc: 0.0
+            }
+            .is_sane()
+        );
+        // Each field checked, not just the first: a validator that forgets
+        // one is exactly the bug this catches.
+        for bad in [f32::NAN, -1.0, f32::INFINITY, 1e6] {
+            assert!(!FieldWeights { title: bad, ..w() }.is_sane(), "title {bad}");
+            assert!(!FieldWeights { tag: bad, ..w() }.is_sane(), "tag {bad}");
+            assert!(!FieldWeights { desc: bad, ..w() }.is_sane(), "desc {bad}");
+        }
     }
 
     // ---- prefix expansion --------------------------------------------

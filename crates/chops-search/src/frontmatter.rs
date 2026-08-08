@@ -18,6 +18,12 @@ use unicode_normalization::char::is_combining_mark;
 #[derive(Debug)]
 pub struct FrontMatter {
     pub title: Option<String>,
+    /// Zola's `description`, used for meta tags and card blurbs. Indexed
+    /// because it is the author's own one-sentence statement of what the
+    /// page answers, written in the register a searcher phrases questions
+    /// in, and because leaving it out meant the best paraphrase evidence
+    /// on the page reached neither engine.
+    pub description: Option<String>,
     pub slug: Option<String>,
     pub path: Option<String>,
     pub draft: bool,
@@ -31,6 +37,7 @@ impl Default for FrontMatter {
     fn default() -> Self {
         FrontMatter {
             title: None,
+            description: None,
             slug: None,
             path: None,
             draft: false,
@@ -61,6 +68,7 @@ pub fn split(src: &str) -> Result<(FrontMatter, &str)> {
 
     let mut fm = FrontMatter {
         title: get_str("title"),
+        description: get_str("description"),
         slug: get_str("slug"),
         path: get_str("path"),
         draft: get_bool("draft").unwrap_or(false),
@@ -117,16 +125,27 @@ mod tests {
 
     #[test]
     fn full_front_matter_parses() {
-        let src = "+++\ntitle = \"Baseline: Where Do the Tasks Go?\"\ndate = 2026-07-01\ndraft = false\n\n[taxonomies]\ntags = [\"celery\", \"redis\", \"chaos-engineering\"]\n+++\nBody text here.\n";
+        let src = "+++\ntitle = \"Baseline: Where Do the Tasks Go?\"\ndescription = \"What happens to queued work when a worker dies mid-task.\"\ndate = 2026-07-01\ndraft = false\n\n[taxonomies]\ntags = [\"celery\", \"redis\", \"chaos-engineering\"]\n+++\nBody text here.\n";
         let (fm, body) = split(src).unwrap();
         assert_eq!(
             fm.title.as_deref(),
             Some("Baseline: Where Do the Tasks Go?")
         );
+        assert_eq!(
+            fm.description.as_deref(),
+            Some("What happens to queued work when a worker dies mid-task.")
+        );
         assert_eq!(fm.tags, vec!["celery", "redis", "chaos-engineering"]);
         assert!(!fm.draft);
         assert!(fm.in_search_index);
         assert_eq!(body.trim(), "Body text here.");
+    }
+
+    #[test]
+    fn description_is_optional() {
+        // Most Zola pages have one; nothing may depend on that.
+        let (fm, _) = split("+++\ntitle = \"T\"\n+++\nx\n").unwrap();
+        assert!(fm.description.is_none());
     }
 
     #[test]
@@ -149,6 +168,7 @@ mod tests {
     fn no_front_matter_is_all_defaults() {
         let (fm, body) = split("Just a body.\n").unwrap();
         assert!(fm.title.is_none());
+        assert!(fm.description.is_none());
         assert!(fm.in_search_index);
         assert_eq!(body, "Just a body.\n");
     }

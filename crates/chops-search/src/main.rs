@@ -39,7 +39,7 @@ use chops_search_core::builder::{
 };
 use chops_search_core::chunk::{chunk_prose, prepare_markdown};
 use chops_search_core::format::{Doc, Index, ModelMeta, Posting};
-use chops_search_core::keyword::keyword_words;
+use chops_search_core::keyword::{FieldWeights, keyword_words};
 use chops_search_core::wordpiece::Vocab;
 
 const AFTER_HELP: &str = "\
@@ -63,9 +63,9 @@ Docs: https://github.com/gitbadger-clan/chops-search";
     about = "Hybrid keyword + semantic search for static sites",
     long_about = "\
 Builds a browser-side search index for a static site: BM25F over keyword \
-postings (title, tags, and body scored as separate fields) fused with \
-cosine similarity over model2vec embeddings, served as static files and \
-queried without a server.
+postings (title, tags, description, and body scored as separate fields) \
+fused with cosine similarity over model2vec embeddings, served as static \
+files and queried without a server.
 
 Run `chops-search init` in a Zola site to get started.",
     after_help = AFTER_HELP
@@ -258,6 +258,13 @@ turned up in.")]
         /// so they normally outweigh the title.
         #[arg(long, value_name = "WEIGHT")]
         w_tag: Option<f32>,
+        /// BM25F weight on front-matter description matches. Default:
+        /// whatever index.bin was built with.
+        ///
+        /// For asking whether a result is riding on its description
+        /// rather than its prose: 0 ignores the field entirely.
+        #[arg(long, value_name = "WEIGHT")]
+        w_desc: Option<f32>,
         /// Minimum top-median cosine contrast for an uncorroborated
         /// semantic list. Default 0 (disabled).
         ///
@@ -333,6 +340,15 @@ the real ones.")]
         /// more per occurrence than anything else on the page.
         #[arg(long, value_name = "WEIGHT")]
         w_tag: Option<f32>,
+        /// BM25F weight on front-matter description matches. Default:
+        /// whatever index.bin was built with.
+        ///
+        /// For sweeping. Descriptions are author-written summaries in
+        /// the register searchers phrase questions in, but they are also
+        /// low-variance across a corpus; 0 answers whether yours earn
+        /// their keep.
+        #[arg(long, value_name = "WEIGHT")]
+        w_desc: Option<f32>,
         /// Coefficient on the chunk-count correction. Default 0.02.
         ///
         /// For sweeping. Longer documents get more chances at a high
@@ -423,6 +439,7 @@ fn main() -> Result<()> {
             kw_floor,
             w_title,
             w_tag,
+            w_desc,
             min_gap,
             strong_cos,
         } => {
@@ -432,6 +449,7 @@ fn main() -> Result<()> {
                 kw_floor,
                 w_title,
                 w_tag,
+                w_desc,
                 min_gap,
                 strong_cos,
                 ..Default::default()
@@ -448,6 +466,7 @@ fn main() -> Result<()> {
             kw_floor,
             w_title,
             w_tag,
+            w_desc,
             min_gap,
             strong_cos,
         } => {
@@ -462,6 +481,7 @@ fn main() -> Result<()> {
                 strong_cos,
                 w_title,
                 w_tag,
+                w_desc,
             };
             chops_search::eval::eval(&dir, &queries, kind.as_deref(), fail_under, args)
         }
@@ -539,6 +559,10 @@ fn clean_artifacts(out: &Path) -> Result<()> {
 enum Field {
     Title,
     Tag,
+    /// Zola's front-matter `description`. Its own field rather than body
+    /// text: counting it as body inflated dl_body, so a fuller
+    /// description quietly discounted every other term on the page.
+    Desc,
     Body,
 }
 
@@ -551,6 +575,7 @@ enum Field {
 struct FieldTf {
     title: u16,
     tag: u16,
+    desc: u16,
     body: u16,
 }
 
@@ -559,6 +584,7 @@ impl FieldTf {
         let slot = match field {
             Field::Title => &mut self.title,
             Field::Tag => &mut self.tag,
+            Field::Desc => &mut self.desc,
             Field::Body => &mut self.body,
         };
         // A term appearing 65k times in one body is absurd but not worth
@@ -646,6 +672,9 @@ fn build(cfg: &Config, runtime: bool) -> Result<()> {
             }
         };
         count_words(&title, Field::Title);
+        if let Some(desc) = &fm.description {
+            count_words(desc, Field::Desc);
+        }
         for tag in &fm.tags {
             count_words(tag, Field::Tag);
         }
@@ -730,6 +759,7 @@ fn build(cfg: &Config, runtime: bool) -> Result<()> {
                 doc: doc_id as u16,
                 title: f.title,
                 tag: f.tag,
+                desc: f.desc,
                 body: f.body,
             });
         }
@@ -737,16 +767,17 @@ fn build(cfg: &Config, runtime: bool) -> Result<()> {
     let mut terms: Vec<(String, Vec<Posting>)> = postings.into_iter().collect();
     terms.sort_by(|a, b| a.0.cmp(&b.0)); // byte-stable output
     for (_, p) in &mut terms {
-        // By doc id: Posting has no Ord (the other three fields have no
-        // meaningful order), and doc id is the only key the reader cares
-        // about anyway.
+        // By doc id: Posting has no Ord (the four tf fields have no
+        // meaningful order between them), and doc id is the only key the
+        // reader cares about anyway.
         p.sort_unstable_by_key(|p| p.doc);
     }
     eprintln!(
-        "keyword: {} terms, BM25F weights title {:.2}, tag {:.2}",
+        "keyword: {} terms, BM25F weights title {:.2}, tag {:.2}, desc {:.2}",
         terms.len(),
         cfg.title_weight,
-        cfg.tag_weight
+        cfg.tag_weight,
+        cfg.desc_weight
     );
 
     // ---- 7. Serialize --------------------------------------------------
@@ -764,8 +795,11 @@ fn build(cfg: &Config, runtime: bool) -> Result<()> {
         global_scale,
         // Baked in so the browser scores with the site's configuration;
         // eval and query can still override per run without a rebuild.
-        w_title: cfg.title_weight,
-        w_tag: cfg.tag_weight,
+        weights: FieldWeights {
+            title: cfg.title_weight,
+            tag: cfg.tag_weight,
+            desc: cfg.desc_weight,
+        },
         docs,
         chunk_doc,
         chunk_vecs,
@@ -1008,11 +1042,32 @@ mod tests {
         // pre-multiplied number.
         let mut tf = FieldTf::default();
         tf.add(Field::Title);
+        tf.add(Field::Desc);
         tf.add(Field::Body);
         tf.add(Field::Body);
         assert_eq!(tf.title, 1);
         assert_eq!(tf.tag, 0);
+        assert_eq!(tf.desc, 1);
         assert_eq!(tf.body, 2);
+    }
+
+    #[test]
+    fn every_field_has_its_own_slot() {
+        // Four same-typed counters behind one `add`: a mismatched match
+        // arm would be invisible except here.
+        for (field, pick) in [
+            (Field::Title, 0usize),
+            (Field::Tag, 1),
+            (Field::Desc, 2),
+            (Field::Body, 3),
+        ] {
+            let mut tf = FieldTf::default();
+            tf.add(field);
+            let got = [tf.title, tf.tag, tf.desc, tf.body];
+            for (i, v) in got.iter().enumerate() {
+                assert_eq!(*v, u16::from(i == pick), "{field:?} landed in slot {i}");
+            }
+        }
     }
 
     #[test]

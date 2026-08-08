@@ -51,12 +51,13 @@ pub fn list_docs(artifacts: &Path) -> Result<()> {
 struct FieldTotals {
     title: u32,
     tag: u32,
+    desc: u32,
     body: u32,
 }
 
 impl FieldTotals {
     fn is_empty(&self) -> bool {
-        self.title == 0 && self.tag == 0 && self.body == 0
+        self.title == 0 && self.tag == 0 && self.desc == 0 && self.body == 0
     }
 }
 
@@ -99,9 +100,11 @@ pub fn explain(artifacts: &Path, query: &str, limit: usize, args: ScoreArgs) -> 
     println!("kw words:  {:?}", report.kw_words);
     println!("wordpiece: {pieces:?}");
     println!(
-        "kw:        avg len title {:.1}, tag {:.1}, body {:.1}; confidence {:.2} (floor {:.2}){}",
+        "kw:        avg len title {:.1}, tag {:.1}, desc {:.1}, body {:.1}; \
+         confidence {:.2} (floor {:.2}){}",
         report.avg_title,
         report.avg_tag,
+        report.avg_desc,
         report.avg_body,
         report.kw_confidence,
         opts.kw_confidence,
@@ -149,6 +152,7 @@ pub fn explain(artifacts: &Path, query: &str, limit: usize, args: ScoreArgs) -> 
             };
             f.title += p.title as u32;
             f.tag += p.tag as u32;
+            f.desc += p.desc as u32;
             f.body += p.body as u32;
         }
     }
@@ -179,16 +183,16 @@ pub fn explain(artifacts: &Path, query: &str, limit: usize, args: ScoreArgs) -> 
     }
 
     println!();
-    println!("t/g/b:     title/tag/body term frequencies, summed over the terms above");
+    println!("t/g/d/b:   title/tag/desc/body term frequencies, summed over the terms above");
     println!(
-        "{:<4} {:>8} {:>4} {:>9} {:>9} {:>5} {:>9} {:>8} {:>7}  title",
-        "doc", "fused", "kw#", "kw-score", "t/g/b", "sem#", "best-cos", "penalty", "chunks"
+        "{:<4} {:>8} {:>4} {:>9} {:>11} {:>5} {:>9} {:>8} {:>7}  title",
+        "doc", "fused", "kw#", "kw-score", "t/g/d/b", "sem#", "best-cos", "penalty", "chunks"
     );
     let rank = |r: Option<u16>| r.map_or_else(|| "-".to_string(), |r| (r + 1).to_string());
     for d in report.docs.iter().take(limit) {
         let f = fields.get(d.doc as usize).copied().unwrap_or_default();
         println!(
-            "{:<4} {:>8.5} {:>4} {:>9} {:>9} {:>5} {:>9} {:>8} {:>7}  {}",
+            "{:<4} {:>8.5} {:>4} {:>9} {:>11} {:>5} {:>9} {:>8} {:>7}  {}",
             d.doc,
             d.fused,
             rank(d.kw_rank),
@@ -200,7 +204,7 @@ pub fn explain(artifacts: &Path, query: &str, limit: usize, args: ScoreArgs) -> 
             if f.is_empty() {
                 "-".to_string()
             } else {
-                format!("{}/{}/{}", f.title, f.tag, f.body)
+                format!("{}/{}/{}/{}", f.title, f.tag, f.desc, f.body)
             },
             rank(d.sem_rank),
             d.best_cos.map_or("-".into(), |c| format!("{c:.3}")),

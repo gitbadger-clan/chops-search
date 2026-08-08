@@ -5,7 +5,7 @@
 use chops_search_core::builder::{embed_f32, quantize_global, quantize_rows};
 use chops_search_core::engine::{Engine, SemanticStatus};
 use chops_search_core::format::{Doc, Index, ModelMeta, Posting};
-use chops_search_core::keyword::{W_TAG, W_TITLE};
+use chops_search_core::keyword::FieldWeights;
 use chops_search_core::score::{KW_CONFIDENCE, ScoreOpts};
 use chops_search_core::wordpiece::Vocab;
 
@@ -32,20 +32,23 @@ fn rows_f32() -> Vec<f32> {
     ]
 }
 
-fn post(doc: u16, title: u16, tag: u16, body: u16) -> Posting {
+/// Field order matches the struct and the wire format, so a call site
+/// reads the same as a hexdump.
+fn post(doc: u16, title: u16, tag: u16, desc: u16, body: u16) -> Posting {
     Posting {
         doc,
         title,
         tag,
+        desc,
         body,
     }
 }
 
 fn build_artifacts() -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) {
-    build_artifacts_with(W_TITLE, W_TAG)
+    build_artifacts_with(FieldWeights::default())
 }
 
-fn build_artifacts_with(w_title: f32, w_tag: f32) -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) {
+fn build_artifacts_with(weights: FieldWeights) -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) {
     let tokens = tokens();
     let rows = rows_f32();
     let vocab = Vocab::from_tokens(&tokens);
@@ -81,8 +84,7 @@ fn build_artifacts_with(w_title: f32, w_tag: f32) -> (Vec<u8>, Vec<u8>, Vec<u8>,
     let index = Index {
         dim: DIM as u16,
         global_scale: gscale,
-        w_title,
-        w_tag,
+        weights,
         docs: vec![
             Doc {
                 url: "/beer-flood/".into(),
@@ -107,13 +109,18 @@ fn build_artifacts_with(w_title: f32, w_tag: f32) -> (Vec<u8>, Vec<u8>, Vec<u8>,
         // "granite" deliberately absent: a granite query must arrive at
         // fusion with zero keyword corroboration.
         terms: vec![
-            ("audio".into(), vec![post(1, 1, 0, 2)]),
-            ("beer".into(), vec![post(0, 1, 0, 2)]),
-            ("flood".into(), vec![post(0, 1, 0, 1)]),
+            ("audio".into(), vec![post(1, 1, 0, 1, 2)]),
+            ("beer".into(), vec![post(0, 1, 0, 1, 2)]),
+            ("flood".into(), vec![post(0, 1, 0, 0, 1)]),
             // Title says "pipelines"; this index has no stemmer, so the
             // singular term legitimately has a title tf of 0.
-            ("pipeline".into(), vec![post(1, 0, 0, 1)]),
-            ("pydub".into(), vec![post(1, 0, 0, 3)]), // OOV term only keyword knows
+            ("pipeline".into(), vec![post(1, 0, 0, 0, 1)]),
+            ("pydub".into(), vec![post(1, 0, 0, 0, 3)]), // OOV term only keyword knows
+            // Description-only: appears in doc2's front-matter
+            // description and nowhere in its prose. Out of vocabulary
+            // too, so a query for it is keyword-only by construction and
+            // isolates the desc field from the semantic side.
+            ("quarry".into(), vec![post(2, 0, 0, 2, 0)]),
         ],
     };
 
@@ -214,24 +221,33 @@ fn quantization_fidelity_query_vs_f32() {
 fn engine_takes_field_weights_from_the_index() {
     // The trap this guards: seeding opts with a bare
     // `ScoreOpts::default()` would compile fine and silently ignore what
-    // the corpus was built with. Non-default weights make that visible.
-    let (meta, index, _rows, _prefix) = build_artifacts_with(7.0, 9.0);
+    // the corpus was built with. Non-default weights make that visible,
+    // and all three are distinct so a transposed pair cannot pass.
+    let built = FieldWeights {
+        title: 7.0,
+        tag: 9.0,
+        desc: 5.0,
+    };
+    let (meta, index, _rows, _prefix) = build_artifacts_with(built);
     let e = Engine::new(&meta, &index).unwrap();
-    assert_eq!(e.score_opts().w_title, 7.0);
-    assert_eq!(e.score_opts().w_tag, 9.0);
+    assert_eq!(e.score_opts().weights, built);
 }
 
 #[test]
 fn field_weights_survive_the_byte_roundtrip_and_move_scores() {
-    // "beer" sits in doc0's title (tf 1) and body (tf 2). Dropping the
-    // title weight to zero must lower its BM25F score — end to end,
-    // through index.bin's header rather than through a constant.
+    // "beer" sits in doc0's title (tf 1), description (tf 1), and body
+    // (tf 2). Dropping the title weight to zero must lower its BM25F
+    // score — end to end, through index.bin's header rather than through
+    // a constant.
     let (meta, index, _rows, prefix_file) = build_artifacts();
     let mut weighted = Engine::new(&meta, &index).unwrap();
     weighted.ingest(0, &prefix_file).unwrap();
     let with_title = weighted.search_detailed("beer").docs[0].kw_score;
 
-    let (meta0, index0, _rows0, prefix0) = build_artifacts_with(0.0, W_TAG);
+    let (meta0, index0, _rows0, prefix0) = build_artifacts_with(FieldWeights {
+        title: 0.0,
+        ..FieldWeights::default()
+    });
     let mut bodyonly = Engine::new(&meta0, &index0).unwrap();
     bodyonly.ingest(0, &prefix0).unwrap();
     let without_title = bodyonly.search_detailed("beer").docs[0].kw_score;
@@ -244,16 +260,68 @@ fn field_weights_survive_the_byte_roundtrip_and_move_scores() {
 }
 
 #[test]
-fn report_carries_all_three_field_averages() {
-    // A tagless corpus: title and body averages are real, avg_tag rides
-    // its floor. Explain prints all three, so all three must be finite.
+fn report_carries_all_four_field_averages() {
+    // Titles, descriptions, and bodies are all populated here; no tags
+    // anywhere, so avg_tag rides its floor. Explain prints all four, so
+    // all four must be finite.
     let (meta, index, _rows, prefix_file) = build_artifacts();
     let mut e = Engine::new(&meta, &index).unwrap();
     e.ingest(0, &prefix_file).unwrap();
     let report = e.search_detailed("beer");
     assert!(report.avg_title > 0.0);
     assert_eq!(report.avg_tag, 1.0, "no tags anywhere → the floor");
+    assert!(
+        report.avg_desc > 1.0,
+        "descriptions are real on this corpus"
+    );
     assert!(report.avg_body > 0.0);
+}
+
+// ---- the description field -------------------------------------------
+
+#[test]
+fn description_only_term_is_findable() {
+    // "quarry" appears in doc2's description and nowhere else: not in
+    // its prose, not in the vocab. If the desc field is dropped anywhere
+    // between the builder and the ranker — write, read, dl_desc, or
+    // term_score — this query returns nothing.
+    let (meta, index, _rows, prefix_file) = build_artifacts();
+    let mut e = Engine::new(&meta, &index).unwrap();
+    e.ingest(0, &prefix_file).unwrap();
+    e.set_score_opts(ScoreOpts::raw());
+
+    assert!(e.plan("quarry").is_empty(), "out of vocabulary by design");
+    let results = e.search("quarry", 5);
+    assert!(
+        !e.used_semantic(),
+        "keyword-only, so the desc field is alone"
+    );
+    assert_eq!(results, vec![2]);
+}
+
+#[test]
+fn desc_weight_zero_removes_description_evidence() {
+    // The property the field exists for: whether descriptions count is a
+    // query-time question, answerable without a rebuild. At w_desc 0 the
+    // only evidence "quarry" had is gone and the list is empty.
+    let (meta, index, _rows, prefix_file) = build_artifacts();
+    let mut e = Engine::new(&meta, &index).unwrap();
+    e.ingest(0, &prefix_file).unwrap();
+    e.set_score_opts(ScoreOpts {
+        weights: FieldWeights {
+            desc: 0.0,
+            ..e.score_opts().weights
+        },
+        ..ScoreOpts::raw()
+    });
+
+    assert!(
+        e.search("quarry", 5).is_empty(),
+        "a desc-only term must carry no evidence at w_desc 0"
+    );
+    // Sibling check: a doc with body evidence is unaffected by the same
+    // override, so this really is the desc field and not a dead ranker.
+    assert_eq!(e.search("pydub", 5), vec![1]);
 }
 
 // ---- corroboration gate ----------------------------------------------

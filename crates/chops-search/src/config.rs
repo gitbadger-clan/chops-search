@@ -30,6 +30,7 @@
 //!
 //! title_weight = 2      # BM25F: a title occurrence against a body one
 //! tag_weight   = 4      # tags are the author's own relevance signal
+//! desc_weight  = 1      # front-matter description, at body parity
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -59,8 +60,15 @@ pub struct Config {
     /// combines the normalized tfs under these weights, and saturates
     /// once — so a weight biases without inflating, and the useful range
     /// is small. 0.0 is legal and means "ignore this field".
+    ///
+    /// `desc_weight` defaults to 1.0, at parity with body, because
+    /// descriptions were previously counted as body terms and the field
+    /// was introduced to fix dl_body pollution rather than to change
+    /// ranking. Sweep it before raising it: measured on the docs corpus,
+    /// description evidence is not weight-sensitive.
     pub title_weight: f32,
     pub tag_weight: f32,
+    pub desc_weight: f32,
 }
 
 impl Config {
@@ -76,6 +84,7 @@ impl Config {
             prefix_rows: 2048,
             title_weight: chops_search_core::keyword::W_TITLE,
             tag_weight: chops_search_core::keyword::W_TAG,
+            desc_weight: chops_search_core::keyword::W_DESC,
         }
     }
 
@@ -181,6 +190,9 @@ impl Config {
         if let Some(v) = num("tag_weight")? {
             cfg.tag_weight = weight("tag_weight", v)?;
         }
+        if let Some(v) = num("desc_weight")? {
+            cfg.desc_weight = weight("desc_weight", v)?;
+        }
 
         // Unknown keys are an error, not a shrug: a misspelled `chunk_size`
         // that silently does nothing is worse than a failed build.
@@ -193,6 +205,7 @@ impl Config {
             "prefix_rows",
             "title_weight",
             "tag_weight",
+            "desc_weight",
         ];
         for key in t.keys() {
             if !KNOWN.contains(&key.as_str()) {
@@ -210,9 +223,9 @@ impl Config {
     /// config edit.
     ///
     /// The field weights are deliberately absent: they're a query-time
-    /// knob, swept with `eval --w-title` / `query --w-title` against an
-    /// index that's already built. Only the value baked into index.bin —
-    /// what the browser will use — comes from here.
+    /// knob, swept with `eval --w-title` / `--w-tag` / `--w-desc` against
+    /// an index that's already built. Only the value baked into
+    /// index.bin — what the browser will use — comes from here.
     pub fn with_overrides(
         mut self,
         content: Option<PathBuf>,
@@ -286,6 +299,7 @@ mod tests {
         assert!(Config::load(&write(&tmp, "chunk_chars = 10\n")).is_err());
         assert!(Config::load(&write(&tmp, "title_weight = -1\n")).is_err());
         assert!(Config::load(&write(&tmp, "tag_weight = 1000\n")).is_err());
+        assert!(Config::load(&write(&tmp, "desc_weight = -0.5\n")).is_err());
         assert!(Config::load(&write(&tmp, "title_weight = \"2\"\n")).is_err());
         std::fs::remove_dir_all(&tmp).ok();
     }
@@ -297,12 +311,22 @@ mod tests {
         // must load, or the change breaks sites on upgrade.
         let tmp = std::env::temp_dir().join(format!("chops-cfg-w-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
-        let cfg = Config::load(&write(&tmp, "title_weight = 2\ntag_weight = 4\n")).unwrap();
+        let cfg = Config::load(&write(
+            &tmp,
+            "title_weight = 2\ntag_weight = 4\ndesc_weight = 1\n",
+        ))
+        .unwrap();
         assert_eq!(cfg.title_weight, 2.0);
         assert_eq!(cfg.tag_weight, 4.0);
-        let cfg = Config::load(&write(&tmp, "title_weight = 1.5\ntag_weight = 0.0\n")).unwrap();
+        assert_eq!(cfg.desc_weight, 1.0);
+        let cfg = Config::load(&write(
+            &tmp,
+            "title_weight = 1.5\ntag_weight = 0.0\ndesc_weight = 0.25\n",
+        ))
+        .unwrap();
         assert_eq!(cfg.title_weight, 1.5);
         assert_eq!(cfg.tag_weight, 0.0, "zero means ignore the field");
+        assert_eq!(cfg.desc_weight, 0.25);
         std::fs::remove_dir_all(&tmp).ok();
     }
 
@@ -333,5 +357,45 @@ mod tests {
         assert_eq!(cfg.chunk_chars, 600);
         // Defaults track core's constants rather than restating them.
         assert_eq!(cfg.title_weight, chops_search_core::keyword::W_TITLE);
+        assert_eq!(cfg.tag_weight, chops_search_core::keyword::W_TAG);
+        assert_eq!(cfg.desc_weight, chops_search_core::keyword::W_DESC);
+    }
+
+    #[test]
+    fn each_weight_key_sets_only_its_own_field() {
+        // Three near-identical parse blocks reading three near-identical
+        // key names: a copy-paste that assigns tag_weight twice compiles
+        // and silently ignores one key.
+        let tmp = std::env::temp_dir().join(format!("chops-cfg-each-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let d = Config::defaults_at(tmp.clone());
+        let only_title = Config::load(&write(&tmp, "title_weight = 9\n")).unwrap();
+        assert_eq!(
+            (
+                only_title.title_weight,
+                only_title.tag_weight,
+                only_title.desc_weight
+            ),
+            (9.0, d.tag_weight, d.desc_weight)
+        );
+        let only_tag = Config::load(&write(&tmp, "tag_weight = 9\n")).unwrap();
+        assert_eq!(
+            (
+                only_tag.title_weight,
+                only_tag.tag_weight,
+                only_tag.desc_weight
+            ),
+            (d.title_weight, 9.0, d.desc_weight)
+        );
+        let only_desc = Config::load(&write(&tmp, "desc_weight = 9\n")).unwrap();
+        assert_eq!(
+            (
+                only_desc.title_weight,
+                only_desc.tag_weight,
+                only_desc.desc_weight
+            ),
+            (d.title_weight, d.tag_weight, 9.0)
+        );
+        std::fs::remove_dir_all(&tmp).ok();
     }
 }
