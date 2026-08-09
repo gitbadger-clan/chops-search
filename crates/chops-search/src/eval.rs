@@ -12,6 +12,15 @@
 //! click the first result. Recall@3 is reported alongside so you can see
 //! whether a regression moved the right answer off the podium or merely
 //! off the top step.
+//!
+//! Sweep mode (`--sweep-rrf-k`, `--sweep-rrf-alpha`) runs the full case
+//! set once per point of the k × alpha grid and prints recall per cell
+//! instead of per-case lines, then re-runs the best cell verbosely so
+//! its per-kind table and failure list come out of the same pass that
+//! scored it. Every other scoring flag acts as the fixed base for every
+//! cell. Rows warm on the first cell — plan() returns empty once a row
+//! is resident — so a sweep costs one cold pass plus N−1 in-memory
+//! passes, same as a browser session issuing many queries.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -33,6 +42,19 @@ struct Tally {
     hit1: usize,
     hit3: usize,
 }
+
+/// One full run of the case set under one ScoreOpts: the tallies, the
+/// misses, and what the byte path cost. Sweep mode produces many of
+/// these; normal mode exactly one.
+#[derive(Default)]
+struct Pass {
+    by_kind: BTreeMap<String, Tally>,
+    overall: Tally,
+    failures: Vec<(String, String, Vec<String>)>,
+    fetched: Vec<u64>,
+    cold: usize,
+}
+
 /// Scoring overrides from the command line. `None` means "whatever the
 /// engine derived from the artifacts" — min_cos scales with
 /// dimensionality and the field weights are read out of index.bin, so
@@ -44,6 +66,12 @@ struct Tally {
 /// map one-to-one onto CLI flags, each is independently overridable, and
 /// clap names them, so the transposition hazard that justifies the struct
 /// inside the engine does not exist here.
+///
+/// `rrf_k` has no disabling value, unlike every other knob here: it is
+/// the RRF rank discount (conventionally 60), always in effect, and only
+/// its magnitude is in question. Small k sharpens the top of the curve
+/// so a decisive #1 in one list can survive mediocrity in the other;
+/// large k flattens toward "best average rank wins".
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ScoreArgs {
     pub min_cos: Option<f32>,
@@ -55,6 +83,7 @@ pub struct ScoreArgs {
     pub w_tag: Option<f32>,
     pub w_desc: Option<f32>,
     pub rrf_alpha: Option<f32>,
+    pub rrf_k: Option<f32>,
 }
 
 impl ScoreArgs {
@@ -91,6 +120,9 @@ impl ScoreArgs {
         if let Some(v) = self.rrf_alpha {
             o.rrf_alpha = v;
         }
+        if let Some(v) = self.rrf_k {
+            o.rrf_k = v;
+        }
         o
     }
 
@@ -106,7 +138,7 @@ impl ScoreArgs {
         format!(
             "kw_floor {:.2}, w_title {:.2}, w_tag {:.2}, w_desc {:.2}, \
              min_cos {:.2}, chunk_penalty {:.3}, min_gap {:.2}, strong_cos {}, \
-             rrf_alpha {:.2}",
+             rrf_alpha {:.2}, rrf_k {:.1}",
             o.kw_confidence,
             o.weights.title,
             o.weights.tag,
@@ -119,17 +151,21 @@ impl ScoreArgs {
             } else {
                 "off".into()
             },
-            o.rrf_alpha
+            o.rrf_alpha,
+            o.rrf_k
         )
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn eval(
     artifacts: &Path,
     queries: &Path,
     kind_filter: Option<&str>,
     fail_under: f32,
     args: ScoreArgs,
+    sweep_rrf_k: &[f32],
+    sweep_rrf_alpha: &[f32],
 ) -> Result<()> {
     let cases = load_cases(queries, kind_filter)?;
     if cases.is_empty() {
@@ -194,13 +230,45 @@ pub fn eval(
         kind_filter.map_or(String::new(), |k| format!("(kind = {k})"))
     );
 
-    let mut by_kind: BTreeMap<String, Tally> = BTreeMap::new();
-    let mut overall = Tally::default();
-    let mut failures: Vec<(String, String, Vec<String>)> = Vec::new();
-    let mut fetched: Vec<u64> = Vec::new();
-    let mut cold = 0usize;
+    if !sweep_rrf_k.is_empty() || !sweep_rrf_alpha.is_empty() {
+        // Gating an exploration would be meaningless: half the grid is
+        // supposed to be worse than the baseline, that's what a sweep is.
+        if fail_under > 0.0 {
+            println!("note: --fail-under is ignored in sweep mode\n");
+        }
+        return sweep(
+            &mut engine,
+            &cases,
+            &rows_bytes,
+            opts,
+            sweep_rrf_k,
+            sweep_rrf_alpha,
+        );
+    }
 
-    for case in &cases {
+    let pass = run_pass(&mut engine, &cases, &rows_bytes, true)?;
+    print_summary(&pass);
+    print_bytes(&pass);
+    print_failures(&pass);
+
+    let score = pct(pass.overall.hit1, pass.overall.n) / 100.0;
+    if score < fail_under {
+        bail!(
+            "recall@1 {:.0}% below --fail-under {:.0}%",
+            score * 100.0,
+            fail_under * 100.0
+        );
+    }
+    Ok(())
+}
+
+/// Run every case through the engine over the real byte path, under
+/// whatever ScoreOpts the engine currently holds. Verbose prints the
+/// per-case PASS/top3/FAIL lines; sweep mode runs quiet.
+fn run_pass(engine: &mut Engine, cases: &[Case], rows_bytes: &[u8], verbose: bool) -> Result<Pass> {
+    let mut pass = Pass::default();
+
+    for case in cases {
         // Range-fetch simulation: the plan decides, we slice, engine ingests.
         let mut bytes_this_query = 0u64;
         for r in engine.plan(&case.q) {
@@ -217,9 +285,9 @@ pub fn eval(
                 .map_err(|e| anyhow::anyhow!("ingest at {start}: {e}"))?;
         }
         if bytes_this_query > 0 {
-            cold += 1;
+            pass.cold += 1;
         }
-        fetched.push(bytes_this_query);
+        pass.fetched.push(bytes_this_query);
 
         let ids = engine.search(&case.q, 3);
         let urls: Vec<String> = ids
@@ -237,47 +305,139 @@ pub fn eval(
             )
         };
 
-        let t = by_kind.entry(case.kind.clone()).or_default();
+        let t = pass.by_kind.entry(case.kind.clone()).or_default();
         t.n += 1;
-        overall.n += 1;
+        pass.overall.n += 1;
         if hit1 {
             t.hit1 += 1;
-            overall.hit1 += 1;
+            pass.overall.hit1 += 1;
         }
         if hit3 {
             t.hit3 += 1;
-            overall.hit3 += 1;
+            pass.overall.hit3 += 1;
         }
 
-        let mark = if hit1 {
-            "PASS"
-        } else if hit3 {
-            "top3"
-        } else {
-            "FAIL"
-        };
-        println!(
-            "{mark}  {:<13} {:<44} {}  [{}]",
-            case.kind,
-            truncate(&case.q, 44),
-            urls.first().map_or("(no results)", String::as_str),
-            if engine.used_semantic() {
-                "hybrid"
+        if verbose {
+            let mark = if hit1 {
+                "PASS"
+            } else if hit3 {
+                "top3"
             } else {
-                "kw"
-            }
-        );
+                "FAIL"
+            };
+            println!(
+                "{mark}  {:<13} {:<44} {}  [{}]",
+                case.kind,
+                truncate(&case.q, 44),
+                urls.first().map_or("(no results)", String::as_str),
+                if engine.used_semantic() {
+                    "hybrid"
+                } else {
+                    "kw"
+                }
+            );
+        }
         if !hit1 {
-            failures.push((case.kind.clone(), case.q.clone(), urls));
+            pass.failures
+                .push((case.kind.clone(), case.q.clone(), urls));
         }
     }
+    Ok(pass)
+}
 
-    // ---- Summary -------------------------------------------------------
+/// The k × alpha grid. An empty axis is a singleton at the base value,
+/// so `--sweep-rrf-k` alone sweeps one knob while the other stays put.
+/// The best cell (recall@1, ties on recall@3, then first in grid order
+/// for determinism) is re-run at the end for its per-kind breakdown and
+/// failure list — that pass is warm, so it re-scores rather than
+/// re-fetches, and its numbers are the same pass that won the grid.
+fn sweep(
+    engine: &mut Engine,
+    cases: &[Case],
+    rows_bytes: &[u8],
+    base: ScoreOpts,
+    ks: &[f32],
+    alphas: &[f32],
+) -> Result<()> {
+    let ks: Vec<f32> = if ks.is_empty() {
+        vec![base.rrf_k]
+    } else {
+        ks.to_vec()
+    };
+    let alphas: Vec<f32> = if alphas.is_empty() {
+        vec![base.rrf_alpha]
+    } else {
+        alphas.to_vec()
+    };
+
+    println!(
+        "sweep:   recall@1 (recall@3), {} cases per cell\n",
+        cases.len()
+    );
+    print!("{:>11}", "");
+    for a in &alphas {
+        print!("{:>13}", format!("alpha {a:.2}"));
+    }
+    println!();
+
+    // (k, alpha, hit1, hit3)
+    let mut best: Option<(f32, f32, usize, usize)> = None;
+    for &k in &ks {
+        print!("{:>11}", format!("rrf_k {k:.1}"));
+        for &a in &alphas {
+            let mut o = base;
+            o.rrf_k = k;
+            o.rrf_alpha = a;
+            engine.set_score_opts(o);
+            let p = run_pass(engine, cases, rows_bytes, false)?;
+            print!(
+                "{:>13}",
+                format!(
+                    "{:.0}% ({:.0}%)",
+                    pct(p.overall.hit1, p.overall.n),
+                    pct(p.overall.hit3, p.overall.n)
+                )
+            );
+            let better = match best {
+                None => true,
+                Some((_, _, h1, h3)) => {
+                    p.overall.hit1 > h1 || (p.overall.hit1 == h1 && p.overall.hit3 > h3)
+                }
+            };
+            if better {
+                best = Some((k, a, p.overall.hit1, p.overall.hit3));
+            }
+        }
+        println!();
+    }
+
+    let (k, a, h1, h3) = best.expect("grid has at least one cell");
+    println!(
+        "\nbest:    rrf_k {k:.1}, rrf_alpha {a:.2} → recall@1 {:.0}%, recall@3 {:.0}%\n",
+        pct(h1, cases.len()),
+        pct(h3, cases.len())
+    );
+
+    let mut o = base;
+    o.rrf_k = k;
+    o.rrf_alpha = a;
+    engine.set_score_opts(o);
+    let p = run_pass(engine, cases, rows_bytes, false)?;
+    print_summary(&p);
+    print_failures(&p);
+    println!(
+        "\nlock it in: chops-search eval --rrf-k {k} --rrf-alpha {a} \
+         (plus whatever base flags this sweep ran with)"
+    );
+    Ok(())
+}
+
+fn print_summary(pass: &Pass) {
     println!(
         "\n{:<14} {:>4} {:>10} {:>10}",
         "kind", "n", "recall@1", "recall@3"
     );
-    for (kind, t) in &by_kind {
+    for (kind, t) in &pass.by_kind {
         println!(
             "{:<14} {:>4} {:>9.0}% {:>9.0}%",
             kind,
@@ -289,46 +449,41 @@ pub fn eval(
     println!(
         "{:<14} {:>4} {:>9.0}% {:>9.0}%",
         "OVERALL",
-        overall.n,
-        pct(overall.hit1, overall.n),
-        pct(overall.hit3, overall.n)
+        pass.overall.n,
+        pct(pass.overall.hit1, pass.overall.n),
+        pct(pass.overall.hit3, pass.overall.n)
     );
+}
 
+fn print_bytes(pass: &Pass) {
     // Bytes: the product claim ("~1 KB per query") made checkable. Note
     // these shrink over a session as rows stay warm, so the first
     // occurrence of a term pays and later ones don't — same as a browser.
-    let total: u64 = fetched.iter().sum();
-    let max = fetched.iter().copied().max().unwrap_or(0);
+    let total: u64 = pass.fetched.iter().sum();
+    let max = pass.fetched.iter().copied().max().unwrap_or(0);
     println!(
         "\nrange-fetched: {:.1} KB total, {:.1} KB mean, {:.1} KB worst; \
          {}/{} queries needed no fetch (prefix hit or warm)",
         total as f64 / 1024.0,
-        total as f64 / 1024.0 / fetched.len() as f64,
+        total as f64 / 1024.0 / pass.fetched.len() as f64,
         max as f64 / 1024.0,
-        fetched.len() - cold,
-        fetched.len()
+        pass.fetched.len() - pass.cold,
+        pass.fetched.len()
     );
+}
 
-    if !failures.is_empty() {
-        println!("\nfailures:");
-        for (kind, q, urls) in &failures {
-            println!("  [{kind}] {q:?}");
-            for (i, u) in urls.iter().enumerate() {
-                println!("      {}. {u}", i + 1);
-            }
-            println!("      explain: cargo run -p chops-search --release -- query {q:?}");
+fn print_failures(pass: &Pass) {
+    if pass.failures.is_empty() {
+        return;
+    }
+    println!("\nfailures:");
+    for (kind, q, urls) in &pass.failures {
+        println!("  [{kind}] {q:?}");
+        for (i, u) in urls.iter().enumerate() {
+            println!("      {}. {u}", i + 1);
         }
+        println!("      explain: cargo run -p chops-search --release -- query {q:?}");
     }
-
-    let score = pct(overall.hit1, overall.n) / 100.0;
-    if score < fail_under {
-        bail!(
-            "recall@1 {:.0}% below --fail-under {:.0}%",
-            score * 100.0,
-            fail_under * 100.0
-        );
-    }
-    Ok(())
 }
 
 fn pct(hit: usize, n: usize) -> f32 {
@@ -412,6 +567,7 @@ mod tests {
                 desc: 0.5,
             },
             rrf_alpha: 0.75,
+            rrf_k: 12.0,
         }
     }
 
@@ -429,6 +585,7 @@ mod tests {
         assert_eq!(o.strong_cos, b.strong_cos);
         assert_eq!(o.weights, b.weights);
         assert_eq!(o.rrf_alpha, b.rrf_alpha);
+        assert_eq!(o.rrf_k, b.rrf_k);
     }
 
     #[test]
@@ -518,6 +675,29 @@ mod tests {
     }
 
     #[test]
+    fn rrf_k_overrides_alone() {
+        // The other half of the fusion pair. Same orthogonality claim:
+        // sweeping the curve's shape must not touch either engine, and
+        // it must not drag rrf_alpha along.
+        let o = ScoreArgs {
+            rrf_k: Some(5.0),
+            ..Default::default()
+        }
+        .apply(base());
+        assert_eq!(o.rrf_k, 5.0);
+        assert_eq!(o.rrf_alpha, base().rrf_alpha);
+        assert_eq!(o.weights, base().weights);
+        assert_eq!(o.min_cos, base().min_cos);
+
+        let swept = ScoreArgs {
+            rrf_alpha: Some(1.0),
+            ..Default::default()
+        }
+        .apply(base());
+        assert_eq!(swept.rrf_k, base().rrf_k);
+    }
+
+    #[test]
     fn describe_reports_every_knob() {
         let s = ScoreArgs::describe(&base());
         for knob in [
@@ -530,6 +710,7 @@ mod tests {
             "min_gap",
             "strong_cos",
             "rrf_alpha",
+            "rrf_k",
         ] {
             assert!(s.contains(knob), "{knob} missing from {s:?}");
         }

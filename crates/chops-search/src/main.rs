@@ -284,11 +284,21 @@ turned up in.")]
         /// in fusion. Default: whatever the engine ships (0, plain RRF).
         ///
         /// For diagnosing a result that both engines ranked differently:
-        /// the keyword list fuses at 1 + alpha × confidence, and needs
-        /// to reach about 2 before it can overturn a semantic first
-        /// place. 0 is plain RRF.
+        /// the keyword list fuses at 1 + alpha × confidence. At the
+        /// default rrf_k of 60 it needs to reach about 2 before it can
+        /// overturn a semantic first place; a smaller --rrf-k moves that
+        /// crossover down. 0 is plain RRF.
         #[arg(long, value_name = "ALPHA")]
         rrf_alpha: Option<f32>,
+        /// RRF rank discount k. Default: whatever the engine ships (60).
+        ///
+        /// For diagnosing fusion resolution: the conventional 60 is
+        /// nearly flat across a dozen-deep list, so at corpus scale a
+        /// decisive #1 in one engine can lose to mediocre presence in
+        /// both. A shape parameter with no disabling value — smaller
+        /// sharpens the top of the curve.
+        #[arg(long, value_name = "K")]
+        rrf_k: Option<f32>,
     },
 
     /// Score the engine against a labelled query set.
@@ -299,7 +309,12 @@ query kind.
 
 Because it drives the actual loading logic, a bug in range planning shows \
 up as a recall drop rather than hiding. The reported bytes-per-query are \
-the real ones.")]
+the real ones.
+
+With --sweep-rrf-k / --sweep-rrf-alpha the case set runs once per point \
+of the k × alpha grid and prints recall per cell instead of per-case \
+lines; every other scoring flag acts as the fixed base for every cell, \
+and the best cell is re-run for its per-kind breakdown and failures.")]
     Eval {
         /// Artifacts directory. Default: `out` from chops-search.toml.
         #[arg(long, value_name = "DIR")]
@@ -317,7 +332,7 @@ the real ones.")]
         ///
         /// Set it just under your current baseline in CI: high enough to
         /// catch a regression, low enough that one flipped case in a
-        /// small set does not fail the build.
+        /// small set does not fail the build. Ignored in sweep mode.
         #[arg(long, value_name = "FRACTION", default_value_t = 0.0)]
         fail_under: f32,
         /// Minimum best-chunk cosine for semantic relevance. Default 0.20.
@@ -387,10 +402,35 @@ the real ones.")]
         /// against a semantic first place by rank arithmetic alone,
         /// which is backwards for exact-match queries; this scales the
         /// keyword list by 1 + alpha × confidence, so only queries with
-        /// real keyword evidence get the louder vote. Values below ~1
-        /// are inert: k = 60 flattens the curve that much.
+        /// real keyword evidence get the louder vote. At the default
+        /// rrf_k of 60 values below ~1 are inert — the curve is that
+        /// flat — and a smaller k moves the crossover down, so sweep
+        /// the two jointly.
         #[arg(long, value_name = "ALPHA")]
         rrf_alpha: Option<f32>,
+        /// RRF rank discount k. Default 60, the deep-list convention.
+        ///
+        /// For pinning a swept value. A shape parameter with no
+        /// disabling value: at corpus scale the conventional 60 is
+        /// nearly flat across a dozen-deep list (rank 1 vs rank 2 is
+        /// 1/61 vs 1/62), so fusion degenerates toward best-average-rank.
+        /// Smaller sharpens the top of the curve.
+        #[arg(long, value_name = "K")]
+        rrf_k: Option<f32>,
+        /// Comma-separated rrf_k values to sweep, e.g. 2,4,8,16,32,60.
+        ///
+        /// Enables sweep mode: the case set runs once per grid point.
+        /// Combine with --sweep-rrf-alpha for the full k × alpha grid;
+        /// alone, alpha stays at its base value.
+        #[arg(long, value_name = "LIST", value_delimiter = ',')]
+        sweep_rrf_k: Vec<f32>,
+        /// Comma-separated rrf_alpha values to sweep, e.g. 0,0.5,1,2.
+        ///
+        /// Enables sweep mode: the case set runs once per grid point.
+        /// Combine with --sweep-rrf-k for the full k × alpha grid;
+        /// alone, k stays at its base value.
+        #[arg(long, value_name = "LIST", value_delimiter = ',')]
+        sweep_rrf_alpha: Vec<f32>,
     },
 
     /// Emit a shell completion script.
@@ -463,6 +503,7 @@ fn main() -> Result<()> {
             min_gap,
             strong_cos,
             rrf_alpha,
+            rrf_k,
         } => {
             let cfg = load_config(&site)?;
             let dir = artifacts.unwrap_or(cfg.out);
@@ -474,6 +515,7 @@ fn main() -> Result<()> {
                 min_gap,
                 strong_cos,
                 rrf_alpha,
+                rrf_k,
                 ..Default::default()
             };
             chops_search::explain::explain(&dir, &query, limit, args)
@@ -492,6 +534,9 @@ fn main() -> Result<()> {
             min_gap,
             strong_cos,
             rrf_alpha,
+            rrf_k,
+            sweep_rrf_k,
+            sweep_rrf_alpha,
         } => {
             let cfg = load_config(&site)?;
             let dir = artifacts.unwrap_or_else(|| cfg.out.clone());
@@ -506,8 +551,17 @@ fn main() -> Result<()> {
                 w_tag,
                 w_desc,
                 rrf_alpha,
+                rrf_k,
             };
-            chops_search::eval::eval(&dir, &queries, kind.as_deref(), fail_under, args)
+            chops_search::eval::eval(
+                &dir,
+                &queries,
+                kind.as_deref(),
+                fail_under,
+                args,
+                &sweep_rrf_k,
+                &sweep_rrf_alpha,
+            )
         }
         Cmd::Model { action } => {
             let cfg = load_config(&site)?;
