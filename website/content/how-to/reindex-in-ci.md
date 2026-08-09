@@ -2,6 +2,8 @@
 title = "Reindex on every push"
 description = "A GitHub Actions recipe that rebuilds the search index whenever content changes, with the model cached against its lockfile and recall gated before deploy."
 weight = 30
+[taxonomies]
+tags = ["ci", "github-actions", "automation", "publishing", "caching"]
 +++
 
 The index should be built by CI, not committed: gitignore `static/search/`,

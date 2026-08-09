@@ -2,6 +2,8 @@
 title = "Indexing rules"
 description = "Exactly which pages get indexed, how URLs are reconstructed from Zola's conventions, and the documented gaps."
 weight = 15
+[taxonomies]
+tags = ["indexing", "front-matter", "urls", "drafts", "zola"]
 +++
 
 The indexer reads Zola's TOML `+++` front matter properly and honours Zola's

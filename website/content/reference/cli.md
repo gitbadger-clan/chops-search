@@ -2,6 +2,8 @@
 title = "CLI"
 description = "Every chops-search subcommand and flag. Defaults are stated inline; --help says the same things."
 weight = 1
+[taxonomies]
+tags = ["commands", "flags", "subcommands"]
 +++
 
 All commands resolve `chops-search.toml` by walking up from the current

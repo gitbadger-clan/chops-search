@@ -2,6 +2,8 @@
 title = "Add search to every page"
 description = "Two template lines mount a Cmd-K search overlay on your whole site, plus how to wire your header's search icon to open it."
 weight = 10
+[taxonomies]
+tags = ["templates", "overlay", "keyboard", "shortcuts", "zola"]
 +++
 
 `build` writes `chops-search.js`, which mounts its own search dialog on any

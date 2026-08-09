@@ -2,6 +2,8 @@
 title = "How ranking works"
 description = "BM25 over pre-WordPiece tokens, cosine over embedded chunks, reciprocal rank fusion, and the relevance floor that makes empty results possible."
 weight = 10
+[taxonomies]
+tags = ["ranking", "bm25", "fusion", "relevance-floor", "tuning"]
 +++
 
 Two engines, fused. They fail differently, which is the whole point: keyword

@@ -8,6 +8,10 @@ build_search_index = false   # this site is searched by chops-search itself
 generate_feeds = false
 minify_html = false
 
+taxonomies = [
+    { name = "tags", feed = false, paginate_by = 20 },
+]
+
 [markdown]
 smart_punctuation = false
 

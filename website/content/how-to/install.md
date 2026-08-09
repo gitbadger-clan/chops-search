@@ -2,6 +2,8 @@
 title = "Install chops-search"
 description = "Install the chops-search CLI from crates.io or from source. One binary, no wasm toolchain, no npm."
 weight = 1
+[taxonomies]
+tags = ["installation", "cargo", "setup", "source-build"]
 +++
 
 **TL;DR**

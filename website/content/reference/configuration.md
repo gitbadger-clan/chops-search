@@ -2,6 +2,8 @@
 title = "Configuration"
 description = "Every chops-search.toml key with its default, and how config discovery and path resolution work."
 weight = 5
+[taxonomies]
+tags = ["configuration", "toml", "defaults", "tuning"]
 +++
 
 Configuration lives in `chops-search.toml` at the site root. Discovery walks

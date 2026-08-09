@@ -2,6 +2,8 @@
 title = "Drive your theme's search UI"
 description = "Run chops-search in inline mode against your theme's existing search markup instead of the self-mounted overlay."
 weight = 15
+[taxonomies]
+tags = ["theming", "inline-mode", "customization", "markup"]
 +++
 
 If your theme already has a search dialog you'd rather keep, chops-search can

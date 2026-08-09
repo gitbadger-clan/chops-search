@@ -2,6 +2,8 @@
 title = "Evaluate Your Search"
 description = "Write a labelled query set for your own corpus, measure recall, diagnose misses with the query command, and gate regressions in CI."
 weight = 2
+[taxonomies]
+tags = ["evaluation", "recall", "regression-testing", "ci"]
 +++
 
 {% aside(kind="note", title="Tutorial Overview") %}

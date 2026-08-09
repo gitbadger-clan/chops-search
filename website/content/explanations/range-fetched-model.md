@@ -2,6 +2,8 @@
 title = "The model is a file you read offsets from"
 description = "Why a model2vec lookup table can be range-fetched row by row, and the four loading disciplines that make a query cost 0.1 KB."
 weight = 1
+[taxonomies]
+tags = ["embeddings", "range-requests", "bandwidth", "performance", "http"]
 +++
 
 Every existing answer to "semantic search on a static site" is some flavour of

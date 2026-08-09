@@ -2,6 +2,8 @@
 title = "When it breaks, it says so"
 description = "The failure modes partial loading creates, and why chops-search degrades to keyword-only or eager loading instead of returning plausible garbage."
 weight = 30
+[taxonomies]
+tags = ["degradation", "keyword-only", "offline", "csp", "troubleshooting"]
 +++
 
 Partial loading creates a failure mode most search libraries don't have: what

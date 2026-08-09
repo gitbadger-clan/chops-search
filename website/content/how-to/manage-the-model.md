@@ -2,6 +2,8 @@
 title = "Manage the embedding model"
 description = "Fetch, lock, and verify the model2vec model, and what to re-check when you change dims."
 weight = 40
+[taxonomies]
+tags = ["model", "lockfile", "reproducibility", "pca", "dimensions"]
 +++
 
 The embedding model is an input to your build, and chops-search treats it the

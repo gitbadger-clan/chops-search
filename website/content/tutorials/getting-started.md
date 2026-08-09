@@ -2,6 +2,8 @@
 title = "Getting Started"
 description = "Install chops-search, scaffold a Zola site's integration, fetch the model, build the index, and see results locally."
 weight = 1
+[taxonomies]
+tags = ["tutorial", "setup", "quickstart", "zola"]
 +++
 
 {% aside(kind="note", title="Tutorial Overview") %}

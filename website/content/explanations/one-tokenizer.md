@@ -2,6 +2,8 @@
 title = "One tokenizer, enforced structurally"
 description = "Why the engine is one Rust core compiled twice, and the parity tests that pin the tokenizer and embeddings to the reference implementation."
 weight = 20
+[taxonomies]
+tags = ["tokenizer", "wordpiece", "parity", "unicode", "wasm"]
 +++
 
 The classic failure mode of client-side search is two tokenizers: one in the

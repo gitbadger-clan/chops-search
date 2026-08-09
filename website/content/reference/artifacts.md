@@ -2,6 +2,8 @@
 title = "Artifacts"
 description = "Every file build emits, its loading discipline, its cache policy, and what changes when."
 weight = 10
+[taxonomies]
+tags = ["artifacts", "build-output", "caching", "hashing"]
 +++
 
 `chops-search build` writes two kinds of file into `out` (default

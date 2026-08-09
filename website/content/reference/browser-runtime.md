@@ -2,6 +2,8 @@
 title = "Browser runtime"
 description = "The overlay and inline modes, the element and attribute contract, the keyboard map, and the CSS theming surface."
 weight = 25
+[taxonomies]
+tags = ["browser", "javascript", "keyboard", "accessibility", "theming"]
 +++
 
 `chops-search.js` runs in one of two modes, chosen automatically at load.

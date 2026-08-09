@@ -2,6 +2,8 @@
 title = "queries.toml"
 description = "The labelled query set format that eval reads: fields, kinds, and how expectations are scored."
 weight = 20
+[taxonomies]
+tags = ["fixtures", "evaluation", "recall", "format"]
 +++
 
 `chops-search eval` reads `fixtures/queries.toml` beside your

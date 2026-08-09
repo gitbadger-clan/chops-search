@@ -2,6 +2,8 @@
 title = "Enable shell completion"
 description = "Turn on dynamic tab-completion for chops-search in fish, zsh, or bash."
 weight = 50
+[taxonomies]
+tags = ["shell", "completion", "fish", "zsh", "bash"]
 +++
 
 chops-search ships dynamic completion: the binary computes candidates when you

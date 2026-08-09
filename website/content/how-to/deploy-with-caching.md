@@ -2,6 +2,8 @@
 title = "Deploy with correct caching"
 description = "The _headers file for Cloudflare and Netlify, the CSP directives wasm needs, and the three deployment gotchas that cost afternoons."
 weight = 20
+[taxonomies]
+tags = ["deployment", "caching", "csp", "headers", "cloudflare", "netlify"]
 +++
 
 Search works on any static host with no configuration at all. This guide is
