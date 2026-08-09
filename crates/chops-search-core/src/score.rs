@@ -36,6 +36,17 @@
 //! extreme-value anchor instead of an arbitrary length fudge. n = 1 costs
 //! nothing (ln 1 = 0), which is the property a pure length penalty lacks.
 //!
+//! FUSION WEIGHT (`rrf_alpha`). Plain RRF treats both engines as equally
+//! credible on every query. Observed failure: for a query on a unique
+//! compound term the keyword engine ranks the right document first on
+//! df-1 evidence, the semantic engine ranks a topically adjacent page
+//! first, and the arithmetic prefers the semantic winner because
+//! 1/(60+2) + 1/(60+1) > 1/(60+1) + 1/(60+3). Both engines were correct;
+//! the fusion was not. `rrf_alpha` scales the keyword list's vote by
+//! `1 + alpha * kw_confidence`, so a query whose keyword evidence is
+//! strong gets a louder keyword vote and a stopword-heavy one does not.
+//! Sweep with `chops-search eval --rrf-alpha`; 0.0 is plain RRF.
+//!
 //! Note the division of labor: the floor tests RAW similarity (is this
 //! document related at all?), while ranking uses the ADJUSTED score (given
 //! that several are related, which deserves to be first?). Conflating them
@@ -67,6 +78,13 @@ pub const CHUNK_PENALTY: f32 = 0.02;
 /// evidence was. Sweep with `chops-search eval --kw-floor`; 0.0 disables.
 pub const KW_CONFIDENCE: f32 = 0.30;
 
+/// Coefficient scaling the keyword list's RRF vote by its confidence.
+/// Ships at 0.0, which is plain unweighted RRF: this knob changes the
+/// order of results on queries that currently rank correctly, so it
+/// lands inert and is armed only once a sweep says what it is worth.
+/// Sweep with `chops-search eval --rrf-alpha`.
+pub const RRF_ALPHA: f32 = 0.0;
+
 #[derive(Debug, Clone, Copy)]
 pub struct ScoreOpts {
     pub min_cos: f32,
@@ -85,6 +103,17 @@ pub struct ScoreOpts {
     /// parameters is where a transposition compiles, type-checks, and
     /// shows up only as "ranking got slightly worse".
     pub weights: FieldWeights,
+    /// How much a confident keyword list outvotes the semantic one in
+    /// RRF: the keyword list fuses at `1 + rrf_alpha * kw_confidence`,
+    /// the semantic list always at 1.0.
+    ///
+    /// A FLOOR-style knob: 0.0 disables it and reproduces plain RRF
+    /// exactly. Note the scale is not free-form — k = 60 flattens the
+    /// top of the rank curve deliberately, so the keyword weight must
+    /// reach about 2 before it can overturn a semantic first place two
+    /// ranks above it. Values under 1.0 are therefore mostly inert on
+    /// the case this exists for.
+    pub rrf_alpha: f32,
 }
 
 /// A ranked document plus the chunk that earned it its score — the chunk
@@ -117,6 +146,7 @@ impl Default for ScoreOpts {
             min_gap: 0.0,
             strong_cos: f32::INFINITY,
             weights: FieldWeights::default(),
+            rrf_alpha: RRF_ALPHA,
         }
     }
 }
@@ -138,7 +168,19 @@ impl ScoreOpts {
             min_gap: 0.0,
             strong_cos: f32::INFINITY,
             weights: FieldWeights::default(),
+            // A gate-like knob, so raw() disables it: raw() is "the
+            // ranking function with nothing sitting on top", and a
+            // weighted fusion is something sitting on top.
+            rrf_alpha: 0.0,
         }
+    }
+
+    /// The weight the keyword list fuses at, given how much of the
+    /// query's idf mass it actually matched. Lives here rather than in
+    /// the engine so eval, explain, and the browser cannot disagree
+    /// about it, and so rrf.rs stays a pure function of ranks.
+    pub fn kw_rrf_weight(&self, kw_confidence: f32) -> f32 {
+        1.0 + self.rrf_alpha * kw_confidence
     }
 }
 /// Contrast of the best raw cosine against the corpus pack.
@@ -463,6 +505,32 @@ mod tests {
         let raw = ScoreOpts::raw();
         assert_eq!(raw.weights, FieldWeights::default());
         assert_eq!(raw.weights, ScoreOpts::default().weights);
+    }
+
+    #[test]
+    fn rrf_alpha_ships_inert() {
+        // The knob changes the order of results that currently rank
+        // correctly, so the default must reproduce plain RRF exactly.
+        assert_eq!(ScoreOpts::default().rrf_alpha, 0.0);
+        assert_eq!(ScoreOpts::raw().rrf_alpha, 0.0);
+        for conf in [0.0f32, 0.3, 1.0] {
+            assert_eq!(ScoreOpts::default().kw_rrf_weight(conf), 1.0);
+        }
+    }
+
+    #[test]
+    fn kw_weight_scales_with_confidence() {
+        // The point of routing through confidence: a query whose keyword
+        // evidence is weak gets no louder a vote than plain RRF gave it,
+        // while a fully matched rare term reaches the ~2 needed to
+        // overturn a semantic first place (see the module header).
+        let o = ScoreOpts {
+            rrf_alpha: 1.0,
+            ..Default::default()
+        };
+        assert_eq!(o.kw_rrf_weight(0.0), 1.0, "no evidence, no boost");
+        assert_eq!(o.kw_rrf_weight(0.5), 1.5);
+        assert_eq!(o.kw_rrf_weight(1.0), 2.0, "the crossover for kw#1 vs sem#1");
     }
 
     #[test]

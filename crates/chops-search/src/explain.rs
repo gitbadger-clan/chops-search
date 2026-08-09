@@ -7,8 +7,9 @@
 //!
 //! Keyword scoring goes through `KeywordIndex::idf`/`term_score`, so it
 //! cannot drift from the ranker — it did once, when BM25 landed here a
-//! commit later than in core. Only the RRF contribution arithmetic is
-//! still restated, because core discards scores after ranking.
+//! commit later than in core. The fusion weight is read off the report
+//! for the same reason: recomputing `1 + alpha * confidence` here would
+//! be a second implementation of a number the ranker already decided.
 //!
 //! The per-field term frequencies come from `index.bin` directly rather
 //! than from the report: `SearchReport` carries df and idf per term, but
@@ -114,6 +115,24 @@ pub fn explain(artifacts: &Path, query: &str, limit: usize, args: ScoreArgs) -> 
             ""
         }
     );
+    // Only worth a line when it is doing something. At alpha 0 the
+    // weight is 1.0 for every query, and printing it on every run would
+    // train the reader to skip the line that matters when it is armed.
+    if opts.rrf_alpha > 0.0 {
+        println!(
+            "fusion:    keyword list at ×{:.2} (1 + rrf_alpha {:.2} × confidence {:.2}){}",
+            report.kw_rrf_weight,
+            opts.rrf_alpha,
+            report.kw_confidence,
+            if report.kw_gated {
+                " — but the list is empty, so it weighs nothing"
+            } else if report.kw_rrf_weight < 2.0 {
+                " — under the ~2 needed to overturn a semantic first place"
+            } else {
+                ""
+            }
+        );
+    }
     for t in &report.terms {
         println!(
             "keyword:   {:?} df={} idf={:.3}{}",
@@ -184,6 +203,14 @@ pub fn explain(artifacts: &Path, query: &str, limit: usize, args: ScoreArgs) -> 
 
     println!();
     println!("t/g/d/b:   title/tag/desc/body term frequencies, summed over the terms above");
+    // The one piece of arithmetic core does not hand over: it discards
+    // the per-list contributions after summing them. Printing the shape
+    // rather than recomputing per-doc keeps that restatement to a
+    // formula the reader can check the columns against.
+    println!(
+        "fused:     {:.2}/(60+kw#) + 1/(60+sem#)",
+        report.kw_rrf_weight
+    );
     println!(
         "{:<4} {:>8} {:>4} {:>9} {:>11} {:>5} {:>9} {:>8} {:>7}  title",
         "doc", "fused", "kw#", "kw-score", "t/g/d/b", "sem#", "best-cos", "penalty", "chunks"

@@ -280,6 +280,15 @@ turned up in.")]
         /// infinity, not at 0 — 0 would disable the gate, not the hatch.
         #[arg(long, value_name = "COS")]
         strong_cos: Option<f32>,
+        /// How much a confident keyword list outvotes the semantic one
+        /// in fusion. Default: whatever the engine ships (0, plain RRF).
+        ///
+        /// For diagnosing a result that both engines ranked differently:
+        /// the keyword list fuses at 1 + alpha × confidence, and needs
+        /// to reach about 2 before it can overturn a semantic first
+        /// place. 0 is plain RRF.
+        #[arg(long, value_name = "ALPHA")]
+        rrf_alpha: Option<f32>,
     },
 
     /// Score the engine against a labelled query set.
@@ -371,6 +380,17 @@ the real ones.")]
         /// infinity, not at 0 — 0 would disable the gate, not the hatch.
         #[arg(long, value_name = "COS")]
         strong_cos: Option<f32>,
+        /// How much a confident keyword list outvotes the semantic one
+        /// in fusion. Default 0, which is plain RRF.
+        ///
+        /// For sweeping. Plain RRF resolves a keyword first place
+        /// against a semantic first place by rank arithmetic alone,
+        /// which is backwards for exact-match queries; this scales the
+        /// keyword list by 1 + alpha × confidence, so only queries with
+        /// real keyword evidence get the louder vote. Values below ~1
+        /// are inert: k = 60 flattens the curve that much.
+        #[arg(long, value_name = "ALPHA")]
+        rrf_alpha: Option<f32>,
     },
 
     /// Emit a shell completion script.
@@ -442,6 +462,7 @@ fn main() -> Result<()> {
             w_desc,
             min_gap,
             strong_cos,
+            rrf_alpha,
         } => {
             let cfg = load_config(&site)?;
             let dir = artifacts.unwrap_or(cfg.out);
@@ -452,6 +473,7 @@ fn main() -> Result<()> {
                 w_desc,
                 min_gap,
                 strong_cos,
+                rrf_alpha,
                 ..Default::default()
             };
             chops_search::explain::explain(&dir, &query, limit, args)
@@ -469,6 +491,7 @@ fn main() -> Result<()> {
             w_desc,
             min_gap,
             strong_cos,
+            rrf_alpha,
         } => {
             let cfg = load_config(&site)?;
             let dir = artifacts.unwrap_or_else(|| cfg.out.clone());
@@ -482,6 +505,7 @@ fn main() -> Result<()> {
                 w_title,
                 w_tag,
                 w_desc,
+                rrf_alpha,
             };
             chops_search::eval::eval(&dir, &queries, kind.as_deref(), fail_under, args)
         }

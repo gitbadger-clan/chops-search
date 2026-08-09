@@ -101,6 +101,11 @@ pub struct SearchReport {
     pub avg_body: f32,
     pub kw_confidence: f32,
     pub kw_gated: bool,
+    /// The weight the keyword list fused at: 1.0 under plain RRF, higher
+    /// once rrf_alpha is armed. Reported rather than recomputed by the
+    /// caller, so explain cannot print a weight the ranker did not use.
+    /// Meaningless when the list was gated, and 1.0 there by convention.
+    pub kw_rrf_weight: f32,
     pub semantic: SemanticStatus,
     /// Fused order, untruncated — callers apply their own limit.
     pub docs: Vec<DocEvidence>,
@@ -324,7 +329,18 @@ impl Engine {
         // succeeded — the floor can empty the list.
         self.used_semantic = !sem_ids.is_empty();
 
-        let fused = rrf::fuse_scored(&[&kw_ranked, &sem_ids], rrf::K);
+        // Weighted fusion. Plain RRF treats both engines as equally
+        // credible on every query; scaling the keyword list by how much
+        // of the query's idf mass it actually matched lets a df-1 exact
+        // hit outvote a topical semantic first place, without giving a
+        // stopword-heavy query the same licence. rrf_alpha 0 (the
+        // default) makes this weight exactly 1.0 and the arithmetic
+        // identical to unweighted RRF.
+        let kw_rrf_weight = self.opts.kw_rrf_weight(kw_confidence);
+        let fused = rrf::fuse_scored(
+            &[(&kw_ranked[..], kw_rrf_weight), (&sem_ids[..], 1.0)],
+            rrf::K,
+        );
         let pos = |list: &[u16], d: u16| list.iter().position(|&x| x == d).map(|p| p as u16);
         let docs: Vec<DocEvidence> = fused
             .into_iter()
@@ -359,6 +375,7 @@ impl Engine {
             avg_body: self.kw.avg_body,
             kw_confidence,
             kw_gated,
+            kw_rrf_weight,
             semantic,
             docs,
             gap,

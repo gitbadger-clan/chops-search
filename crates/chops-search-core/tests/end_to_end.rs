@@ -324,6 +324,127 @@ fn desc_weight_zero_removes_description_evidence() {
     assert_eq!(e.search("pydub", 5), vec![1]);
 }
 
+// ---- weighted fusion --------------------------------------------------
+
+/// The query that reproduces the shape weighted RRF exists for.
+///
+/// "quarry" is a df-1 description term on doc2 and out of vocabulary, so
+/// the semantic side embeds "pipeline" alone: it ranks doc1 first (the
+/// pipeline chunk), doc0 second, doc2 third. The keyword side ranks doc2
+/// first, because a tf-2 hit in a 2-token description beats a tf-1 hit in
+/// a 6-token body. So doc2 is kw#1 / sem#3 and doc1 is kw#2 / sem#1,
+/// which unweighted RRF resolves in favour of doc1:
+///
+///   doc1: 1/62 + 1/61 = 0.032522
+///   doc2: 1/61 + 1/63 = 0.032266
+const SPLIT_QUERY: &str = "quarry pipeline";
+
+#[test]
+fn unweighted_fusion_prefers_the_semantic_winner() {
+    // The precondition for the next test, asserted rather than assumed:
+    // if the fixture ever stops producing this disagreement, that test
+    // would pass vacuously and stop testing anything.
+    let (meta, index, rows_file, _prefix) = build_artifacts();
+    let mut e = Engine::new(&meta, &index).unwrap();
+    e.ingest(0, &rows_file).unwrap();
+    e.set_score_opts(ScoreOpts::raw()); // rrf_alpha 0
+
+    let r = e.search_detailed(SPLIT_QUERY);
+    assert_eq!(r.kw_rrf_weight, 1.0, "raw() must fuse at plain RRF");
+
+    let kw_first = r.docs.iter().find(|d| d.kw_rank == Some(0)).unwrap().doc;
+    let sem_first = r.docs.iter().find(|d| d.sem_rank == Some(0)).unwrap().doc;
+    assert_eq!(kw_first, 2, "keyword side should back the desc-only hit");
+    assert_eq!(sem_first, 1, "semantic side should back the pipeline chunk");
+    let doc2 = r.docs.iter().find(|d| d.doc == 2).unwrap();
+    assert_eq!(
+        doc2.sem_rank,
+        Some(2),
+        "doc2 must be sem#3 for the arithmetic"
+    );
+
+    assert_eq!(r.docs[0].doc, sem_first, "unweighted RRF prefers sem#1");
+}
+
+#[test]
+fn rrf_alpha_lets_a_confident_keyword_list_outvote_the_semantic_one() {
+    // Same query, same corpus, one knob. Both words are corpus terms so
+    // confidence is 1.0 and the weight is 1 + alpha.
+    let (meta, index, rows_file, _prefix) = build_artifacts();
+    let mut e = Engine::new(&meta, &index).unwrap();
+    e.ingest(0, &rows_file).unwrap();
+    e.set_score_opts(ScoreOpts {
+        rrf_alpha: 4.0,
+        ..ScoreOpts::raw()
+    });
+
+    let r = e.search_detailed(SPLIT_QUERY);
+    assert!(
+        (r.kw_rrf_weight - 5.0).abs() < 1e-5,
+        "expected 1 + 4 * confidence, got {}",
+        r.kw_rrf_weight
+    );
+    assert_eq!(r.docs[0].doc, 2, "the df-1 keyword hit should now win");
+    // The semantic winner is demoted, not discarded: weighting trades
+    // between engines, it does not silence one.
+    assert!(r.docs.iter().any(|d| d.doc == 1 && d.sem_rank == Some(0)));
+}
+
+#[test]
+fn a_weak_keyword_list_gets_no_boost() {
+    // The reason the weight routes through kw_confidence rather than
+    // being a flat multiplier: a query whose keyword evidence is mostly
+    // misses must fuse at close to plain RRF even with alpha armed, or
+    // the knob would amplify exactly the stopword rankings the
+    // confidence gate exists to distrust.
+    let (meta, index, rows_file, _prefix) = build_artifacts();
+    let mut e = Engine::new(&meta, &index).unwrap();
+    e.ingest(0, &rows_file).unwrap();
+    e.set_score_opts(ScoreOpts {
+        rrf_alpha: 4.0,
+        ..ScoreOpts::raw()
+    });
+
+    // "beer" matches; zzz/qqq/www miss at max idf → confidence ~0.14.
+    let weak = e.search_detailed("beer zzz qqq www");
+    let strong = e.search_detailed(SPLIT_QUERY);
+    assert!(weak.kw_confidence < 0.2, "{}", weak.kw_confidence);
+    assert!(
+        weak.kw_rrf_weight < 2.0,
+        "weak evidence must not reach the ~2 that overturns a ranking: {}",
+        weak.kw_rrf_weight
+    );
+    assert!(strong.kw_rrf_weight > weak.kw_rrf_weight);
+}
+
+#[test]
+fn a_gated_keyword_list_cannot_be_amplified() {
+    // Confidence gating happens before fusion, so an armed alpha must not
+    // resurrect a list the gate rejected: the weight multiplies an empty
+    // list and changes nothing.
+    let (meta, index, rows_file, _prefix) = build_artifacts();
+    let mut e = Engine::new(&meta, &index).unwrap();
+    e.ingest(0, &rows_file).unwrap();
+
+    let gated = ScoreOpts {
+        kw_confidence: KW_CONFIDENCE,
+        rrf_alpha: 4.0,
+        ..ScoreOpts::raw()
+    };
+    e.set_score_opts(gated);
+    let r = e.search_detailed("beer zzz qqq www");
+    assert!(r.kw_gated);
+    assert!(r.docs.iter().all(|d| d.kw_rank.is_none()));
+
+    // Identical order to the same run with fusion weighting off.
+    e.set_score_opts(ScoreOpts {
+        kw_confidence: KW_CONFIDENCE,
+        ..ScoreOpts::raw()
+    });
+    let plain = e.search_detailed("beer zzz qqq www");
+    assert_eq!(r.ids(5), plain.ids(5));
+}
+
 // ---- corroboration gate ----------------------------------------------
 
 #[test]

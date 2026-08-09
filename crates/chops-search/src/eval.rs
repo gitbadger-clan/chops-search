@@ -54,6 +54,7 @@ pub struct ScoreArgs {
     pub w_title: Option<f32>,
     pub w_tag: Option<f32>,
     pub w_desc: Option<f32>,
+    pub rrf_alpha: Option<f32>,
 }
 
 impl ScoreArgs {
@@ -87,6 +88,9 @@ impl ScoreArgs {
         if let Some(v) = self.w_desc {
             o.weights.desc = v;
         }
+        if let Some(v) = self.rrf_alpha {
+            o.rrf_alpha = v;
+        }
         o
     }
 
@@ -94,13 +98,15 @@ impl ScoreArgs {
     /// different thresholds for the same flags — they diverged once,
     /// when this existed and `eval` printed its own copy anyway.
     ///
-    /// Keyword knobs first, then the semantic ones. strong_cos prints
-    /// "off" at infinity rather than `inf`: it disables at infinity while
-    /// every other knob disables at zero.
+    /// Keyword knobs first, then the semantic ones, then fusion, which
+    /// belongs to neither engine. strong_cos prints "off" at infinity
+    /// rather than `inf`: it disables at infinity while every other knob
+    /// disables at zero.
     pub fn describe(o: &ScoreOpts) -> String {
         format!(
             "kw_floor {:.2}, w_title {:.2}, w_tag {:.2}, w_desc {:.2}, \
-             min_cos {:.2}, chunk_penalty {:.3}, min_gap {:.2}, strong_cos {}",
+             min_cos {:.2}, chunk_penalty {:.3}, min_gap {:.2}, strong_cos {}, \
+             rrf_alpha {:.2}",
             o.kw_confidence,
             o.weights.title,
             o.weights.tag,
@@ -112,7 +118,8 @@ impl ScoreArgs {
                 format!("{:.2}", o.strong_cos)
             } else {
                 "off".into()
-            }
+            },
+            o.rrf_alpha
         )
     }
 }
@@ -404,6 +411,7 @@ mod tests {
                 tag: 7.0,
                 desc: 0.5,
             },
+            rrf_alpha: 0.75,
         }
     }
 
@@ -420,6 +428,7 @@ mod tests {
         assert_eq!(o.min_gap, b.min_gap);
         assert_eq!(o.strong_cos, b.strong_cos);
         assert_eq!(o.weights, b.weights);
+        assert_eq!(o.rrf_alpha, b.rrf_alpha);
     }
 
     #[test]
@@ -473,6 +482,42 @@ mod tests {
     }
 
     #[test]
+    fn rrf_alpha_overrides_alone() {
+        // Fusion weighting is orthogonal to both engines: arming it must
+        // not disturb a floor or a field weight, and sweeping a field
+        // weight must not silently re-arm fusion.
+        let armed = ScoreArgs {
+            rrf_alpha: Some(2.0),
+            ..Default::default()
+        }
+        .apply(base());
+        assert_eq!(armed.rrf_alpha, 2.0);
+        assert_eq!(armed.weights, base().weights);
+        assert_eq!(armed.min_cos, base().min_cos);
+
+        let swept = ScoreArgs {
+            w_title: Some(1.0),
+            ..Default::default()
+        }
+        .apply(base());
+        assert_eq!(swept.rrf_alpha, base().rrf_alpha);
+    }
+
+    #[test]
+    fn rrf_alpha_zero_is_an_override_not_an_absence() {
+        // The knob's disabled value is 0, so `Some(0.0)` must reach
+        // ScoreOpts rather than being mistaken for "unset". Turning
+        // fusion weighting OFF against an index that shipped it on is a
+        // real thing to want to measure.
+        let o = ScoreArgs {
+            rrf_alpha: Some(0.0),
+            ..Default::default()
+        }
+        .apply(base());
+        assert_eq!(o.rrf_alpha, 0.0);
+    }
+
+    #[test]
     fn describe_reports_every_knob() {
         let s = ScoreArgs::describe(&base());
         for knob in [
@@ -484,6 +529,7 @@ mod tests {
             "chunk_penalty",
             "min_gap",
             "strong_cos",
+            "rrf_alpha",
         ] {
             assert!(s.contains(knob), "{knob} missing from {s:?}");
         }
