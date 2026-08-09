@@ -47,6 +47,18 @@
 //! strong gets a louder keyword vote and a stopword-heavy one does not.
 //! Sweep with `chops-search eval --rrf-alpha`; 0.0 is plain RRF.
 //!
+//! FUSION CURVE (`rrf_k`). The RRF rank discount. Unlike every other knob
+//! it has no disabling value: fusion always happens on some curve, and k
+//! only sets its shape. The conventional 60 comes from TREC-scale runs
+//! fusing thousand-deep lists; at corpus scale — tens of documents, lists
+//! a dozen deep — that curve is nearly flat (rank 1 vs rank 2 is 1/61 vs
+//! 1/62, a gap of 0.0003), so fusion degenerates toward "best average
+//! rank wins" and a decisive #1 in one engine cannot survive mediocrity
+//! in the other. Small k re-sharpens the top. Sweep with
+//! `chops-search eval --sweep-rrf-k`, pin with `--rrf-k`; the default
+//! stays `rrf::K` so plain conventional RRF remains the shipped behavior
+//! until a sweep says otherwise.
+//!
 //! Note the division of labor: the floor tests RAW similarity (is this
 //! document related at all?), while ranking uses the ADJUSTED score (given
 //! that several are related, which deserves to be first?). Conflating them
@@ -108,12 +120,20 @@ pub struct ScoreOpts {
     /// the semantic list always at 1.0.
     ///
     /// A FLOOR-style knob: 0.0 disables it and reproduces plain RRF
-    /// exactly. Note the scale is not free-form — k = 60 flattens the
-    /// top of the rank curve deliberately, so the keyword weight must
-    /// reach about 2 before it can overturn a semantic first place two
-    /// ranks above it. Values under 1.0 are therefore mostly inert on
-    /// the case this exists for.
+    /// exactly. Note the scale is not free-form, and it is coupled to
+    /// `rrf_k`: at the default k = 60 the curve is flat enough that the
+    /// keyword weight must reach about 2 before it can overturn a
+    /// semantic first place two ranks above it, so values under 1.0 are
+    /// mostly inert on the case this exists for. A smaller k sharpens
+    /// the curve and moves that crossover down — sweep the two jointly.
     pub rrf_alpha: f32,
+    /// The RRF rank discount k. A SHAPE parameter, not a gate: there is
+    /// no disabling value, only the question of how fast a list's vote
+    /// decays with rank. Defaults to `rrf::K` (the conventional 60) —
+    /// see the module header for why that convention is suspect at
+    /// corpus scale. Sweep with `chops-search eval --sweep-rrf-k`, pin
+    /// with `--rrf-k`.
+    pub rrf_k: f32,
 }
 
 /// A ranked document plus the chunk that earned it its score — the chunk
@@ -147,6 +167,11 @@ impl Default for ScoreOpts {
             strong_cos: f32::INFINITY,
             weights: FieldWeights::default(),
             rrf_alpha: RRF_ALPHA,
+            // The one knob whose default lives in another module: rrf.rs
+            // owns the conventional constant, and a literal 60.0 here
+            // would be a second copy waiting to drift when a swept value
+            // gets pinned.
+            rrf_k: crate::rrf::K,
         }
     }
 }
@@ -172,6 +197,12 @@ impl ScoreOpts {
             // ranking function with nothing sitting on top", and a
             // weighted fusion is something sitting on top.
             rrf_alpha: 0.0,
+            // Like the field weights, NOT reset to anything special: k
+            // is part of the fusion function itself, not something
+            // sitting on top of it. A raw() that fused on a different
+            // curve than the shipped engine would be a different scorer,
+            // not the same scorer unjudged.
+            rrf_k: crate::rrf::K,
         }
     }
 
@@ -523,14 +554,37 @@ mod tests {
         // The point of routing through confidence: a query whose keyword
         // evidence is weak gets no louder a vote than plain RRF gave it,
         // while a fully matched rare term reaches the ~2 needed to
-        // overturn a semantic first place (see the module header).
+        // overturn a semantic first place AT THE DEFAULT k = 60 (see the
+        // module header; a smaller rrf_k moves this crossover down).
         let o = ScoreOpts {
             rrf_alpha: 1.0,
             ..Default::default()
         };
         assert_eq!(o.kw_rrf_weight(0.0), 1.0, "no evidence, no boost");
         assert_eq!(o.kw_rrf_weight(0.5), 1.5);
-        assert_eq!(o.kw_rrf_weight(1.0), 2.0, "the crossover for kw#1 vs sem#1");
+        assert_eq!(
+            o.kw_rrf_weight(1.0),
+            2.0,
+            "the crossover for kw#1 vs sem#1 at the default k = 60"
+        );
+    }
+
+    #[test]
+    fn rrf_k_defaults_to_the_shared_constant() {
+        // One source of truth: the engine and explain fuse with whatever
+        // ScoreOpts carries, and ScoreOpts starts from rrf::K. A literal
+        // 60.0 in Default would be a second copy waiting to drift the
+        // day a swept value gets pinned.
+        assert_eq!(ScoreOpts::default().rrf_k, crate::rrf::K);
+    }
+
+    #[test]
+    fn raw_keeps_the_fusion_curve() {
+        // Same claim as raw_keeps_the_field_weights: raw() strips gates
+        // and corrections, never the ranking or fusion functions
+        // themselves. A raw() on a different curve would be a different
+        // scorer, not the same scorer unjudged.
+        assert_eq!(ScoreOpts::raw().rrf_k, ScoreOpts::default().rrf_k);
     }
 
     #[test]

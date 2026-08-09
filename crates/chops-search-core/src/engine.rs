@@ -329,17 +329,23 @@ impl Engine {
         // succeeded — the floor can empty the list.
         self.used_semantic = !sem_ids.is_empty();
 
-        // Weighted fusion. Plain RRF treats both engines as equally
-        // credible on every query; scaling the keyword list by how much
-        // of the query's idf mass it actually matched lets a df-1 exact
-        // hit outvote a topical semantic first place, without giving a
-        // stopword-heavy query the same licence. rrf_alpha 0 (the
-        // default) makes this weight exactly 1.0 and the arithmetic
-        // identical to unweighted RRF.
+        // Weighted fusion, fully parameterized by opts — this call is the
+        // one place the fusion happens, so both knobs land here. The
+        // keyword list's weight comes from rrf_alpha via kw_confidence:
+        // plain RRF treats both engines as equally credible on every
+        // query, and scaling the keyword vote by how much of the query's
+        // idf mass it actually matched lets a df-1 exact hit outvote a
+        // topical semantic first place, without giving a stopword-heavy
+        // query the same licence. rrf_alpha 0 (the default) makes this
+        // weight exactly 1.0 and the arithmetic identical to unweighted
+        // RRF. The curve's k comes from rrf_k rather than the rrf::K
+        // constant so eval can sweep the discount — at corpus scale the
+        // conventional 60 is nearly flat across a dozen-deep list, which
+        // is a choice to measure, not to hardcode.
         let kw_rrf_weight = self.opts.kw_rrf_weight(kw_confidence);
         let fused = rrf::fuse_scored(
             &[(&kw_ranked[..], kw_rrf_weight), (&sem_ids[..], 1.0)],
-            rrf::K,
+            self.opts.rrf_k,
         );
         let pos = |list: &[u16], d: u16| list.iter().position(|&x| x == d).map(|p| p as u16);
         let docs: Vec<DocEvidence> = fused
