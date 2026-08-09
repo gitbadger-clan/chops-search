@@ -20,13 +20,15 @@
 
 [[query]]
 q = "model2vec-rs"
-# ISSUE: RRF ordering. Keyword ranks one-tokenizer #1 on a df-1 compound;
-# semantic ranks manage-the-model #1 (its description says "verify the
-# model2vec model"), and fusion prefers the semantic winner because
-# 1/(60+2) + 1/(60+1) > 1/(60+1) + 1/(60+3). Backwards for an exact query,
-# and unfixable by field weights or the floor: the inputs are ranks and
-# both engines are correct. Fix: weighted RRF, keyword list scaled by
-# kw_confidence. Wins 2026-08-08: /how-to/manage-the-model/ (expected #2).
+# ISSUE: RRF corroboration penalty, not orderable by any current knob.
+# Keyword ranks it #1 at 7.563 against 2.451 for the winner; the
+# semantic side scores it 0.274 against a 0.28 floor, so it contributes
+# nothing to fusion and doc6 wins on 1/(60+2)+1/(60+1) versus 1/(60+1).
+# Ruled out by measurement: field weights (no value moves it, sweep
+# 2026-08-08), rrf_alpha (needs w > 62, unreachable; swept to 8),
+# min_cos 0.26 (lets it into the list, still loses, and costs two
+# negative controls). Fix would be score-level fusion rather than rank
+# fusion.
 expect = ["/explanations/one-tokenizer/"]
 kind = "exact"
 
