@@ -8,7 +8,16 @@ async function loadFull(url, env) {
   if (!p) {
     p = (async () => {
       const res = await env.ASSETS.fetch(new Request(url));
-      if (!res.ok) throw res;
+      if (!res.ok) {
+        // Don't throw the Response itself: this promise is shared by every
+        // coalesced caller, and a single Response object can only be
+        // returned from one fetch handler. Throw the status; each caller
+        // mints its own Response.
+        res.body?.cancel();
+        throw Object.assign(new Error(`asset fetch failed: ${res.status}`), {
+          status: res.status,
+        });
+      }
       return {
         buf: await res.arrayBuffer(),
         type: res.headers.get("Content-Type") ?? "application/octet-stream",
@@ -16,7 +25,10 @@ async function loadFull(url, env) {
       };
     })();
     inflight.set(url, p);
-    p.finally(() => inflight.delete(url));
+    // .catch first: .finally alone returns a derived promise that mirrors
+    // the rejection with no handler — an unhandled rejection in the logs
+    // on every origin failure. Callers still see the rejection via `p`.
+    p.catch(() => { }).finally(() => inflight.delete(url));
   }
   return p;
 }
@@ -37,35 +49,52 @@ export default {
     }
 
     let full;
-    try { full = await loadFull(url, env); }
-    catch (res) { return res instanceof Response ? res : new Response(null, { status: 502 }); }
+    try {
+      full = await loadFull(url, env);
+    } catch (e) {
+      return new Response(null, { status: e?.status ?? 502 });
+    }
     const { buf, type, cc } = full;
 
-    ctx.waitUntil(cache.put(url, new Response(buf, {
-      headers: {
-        "Content-Type": type,
-        "Content-Length": String(buf.byteLength),
-        "Cache-Control": cc,
-        "Accept-Ranges": "bytes",
-      },
-    })));
+    ctx.waitUntil(
+      cache
+        .put(url, new Response(buf, {
+          headers: {
+            "Content-Type": type,
+            "Content-Length": String(buf.byteLength),
+            "Cache-Control": cc,
+            "Accept-Ranges": "bytes",
+          },
+        }))
+        .catch(() => { }) // caching is an optimization; don't log quota/uncacheable rejections
+    );
+
+    const full200 = () =>
+      new Response(buf, {
+        status: 200,
+        headers: {
+          "Content-Type": type,
+          "Cache-Control": cc,
+          "Accept-Ranges": "bytes",
+          "x-range-source": "cold",
+        },
+      });
 
     const m = /^bytes=(\d+)-(\d*)$/.exec(range);
-    if (!m) {
-      // Multipart or malformed: ignoring Range is spec-legal; client handles 200s.
-      return new Response(buf, {
-        status: 200, headers: {
-          "Content-Type": type, "Cache-Control": cc,
-          "Accept-Ranges": "bytes", "x-range-source": "cold",
-        }
+    // Multipart, suffix (`bytes=-N`), or malformed: ignoring Range is
+    // spec-legal; the client handles 200s.
+    if (!m) return full200();
+
+    const start = Number(m[1]);
+    if (start >= buf.byteLength) {
+      return new Response(null, {
+        status: 416,
+        headers: { "Content-Range": `bytes */${buf.byteLength}` },
       });
     }
-    const start = Number(m[1]);
-    if (start >= buf.byteLength) return new Response(null, {
-      status: 416,
-      headers: { "Content-Range": `bytes */${buf.byteLength}` }
-    });
     const end = m[2] ? Math.min(Number(m[2]), buf.byteLength - 1) : buf.byteLength - 1;
+    // `bytes=5-2`: negative slice length would throw. Treat as malformed.
+    if (end < start) return full200();
 
     return new Response(new Uint8Array(buf, start, end - start + 1), {
       status: 206,
