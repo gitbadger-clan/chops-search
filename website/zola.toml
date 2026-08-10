@@ -9,7 +9,7 @@ generate_feeds = false
 minify_html = false
 
 taxonomies = [
-    { name = "tags", feed = false, paginate_by = 20 },
+    { name = "tags", feed = false, paginate_by = 20, render = false },
 ]
 
 [markdown]
