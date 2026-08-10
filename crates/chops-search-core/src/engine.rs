@@ -256,7 +256,15 @@ impl Engine {
         let kw_ranked = if kw_gated {
             Vec::new()
         } else {
-            KeywordIndex::rank_from_scores(&kw_scores)
+            // Title-cover tier: docs whose titles contain every typed
+            // word rank ahead of docs whose titles don't, BM25F order
+            // within each tier. Cover is computed from the SAME resolved
+            // terms the scores came from, so the trailing word's
+            // expansions can cover mid-typing, and the kw# positions the
+            // report shows are the tiered positions the ranker actually
+            // used.
+            let cover = self.kw.title_cover(&words, &terms);
+            KeywordIndex::rank_from_scores_covered(&kw_scores, &cover)
         };
 
         let term_evidence: Vec<TermEvidence> = terms

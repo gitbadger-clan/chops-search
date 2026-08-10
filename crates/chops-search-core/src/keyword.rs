@@ -50,6 +50,36 @@
 //! damped expansion of a complete word is a small, bounded cost against a
 //! large gain on every keystroke before it.
 //!
+//! EXPANSIONS ARE ALTERNATIVES, NOT CORROBORATION. The trailing word's
+//! expansions are competing hypotheses about what the user is typing, so
+//! per document they score as a MAX, never a sum: a page containing
+//! several completions of "cli" has not multiplied its evidence that the
+//! user means any of them. Summing was observed live as exactly that bug —
+//! for the query "cli", a page containing zero occurrences of "cli" took
+//! kw#1 on the stacked damped scores of "client" + "client-side" +
+//! "clickable", beating the page actually titled "CLI". The exact match
+//! of the trailing word, when it exists, competes IN the same set at full
+//! weight — the hypotheses are {the word as typed} ∪ {its completions},
+//! mutually exclusive by construction. Every other typed word still sums:
+//! distinct words are independent evidence; readings of one word are not.
+//!
+//! TITLE-COVER TIER. A query whose every typed word appears in a
+//! document's title is, with high probability, someone typing toward that
+//! page — a navigational act, not a topical one. Ranking that document by
+//! BM25F alone lets body-and-description prose on other pages outvote its
+//! own name: observed live, where the page titled "CLI" held kw#1-worthy
+//! evidence for the query "cli" and still ranked kw#3, surviving in the
+//! fused order by a margin of 8e-6. So documents whose titles COVER the
+//! query (every distinct typed word present in the title; the trailing
+//! word may be covered through an expansion, so mid-typing still counts)
+//! rank ahead of documents whose titles don't, with BM25F ordering within
+//! each tier. Ordinal on purpose: a tier composes with rank fusion
+//! untouched, where a score bonus would fight the saturation curve. Note
+//! the deliberate consequence: for covered queries, title coverage
+//! outranks the tag weight — W_TAG encodes topical authority, and a
+//! navigational claim outranks a topical one. Within a tier the weights
+//! decide, as before.
+//!
 //! Deliberately not Fuse.js-shaped: no distance windows, no field-start
 //! bias — a term matches wherever it appears in the post. That windowing
 //! is precisely the bug that hid `pydub` at char 3,700 for years.
@@ -123,6 +153,10 @@ pub const PREFIX_MIN_CHARS: usize = 3;
 /// Most expansions considered, lowest-df first.
 pub const PREFIX_MAX_EXPANSIONS: usize = 8;
 /// Weight multiplier for an expanded term relative to an exact match.
+/// Under best-of scoring this is the handicap an expansion carries when
+/// it competes against the exact trailing term inside the hypothesis
+/// set, and the magnitude a doc scores when an expansion is its best
+/// (or only) reading.
 pub const PREFIX_DAMP: f32 = 0.5;
 
 pub struct KeywordIndex {
@@ -153,12 +187,21 @@ pub struct KeywordIndex {
 /// One scored query term, after prefix expansion has been resolved.
 /// `weight` is 1.0 for a term the user typed and PREFIX_DAMP for one
 /// reached by expansion.
+///
+/// `trailing` marks membership in the trailing-word hypothesis set: the
+/// exact term matching the final typed word, plus every expansion of it.
+/// Members of that set score per-document as a MAX (alternative readings
+/// of one word), while non-trailing terms sum (independent evidence).
+/// `expanded` implies `trailing`; the exact trailing term is trailing
+/// but not expanded.
 #[derive(Debug, Clone)]
 pub struct Term {
     pub text: Box<str>,
     pub weight: f32,
     /// True when this term came from expanding the trailing word.
     pub expanded: bool,
+    /// True for every member of the trailing-word hypothesis set.
+    pub trailing: bool,
 }
 
 impl KeywordIndex {
@@ -222,6 +265,14 @@ impl KeywordIndex {
     /// When potential is zero — the query is nothing but an in-progress
     /// word — expansions are the only possible evidence: full confidence
     /// if they exist, zero if not.
+    ///
+    /// DELIBERATE ASYMMETRY with score_terms: expansions here still SUM
+    /// into `matched`. Confidence asks "does the keyword side have any
+    /// evidence for this query", not "how much does one document have",
+    /// so alternative readings all count toward existence-of-evidence,
+    /// and the ratio caps at 1.0 anyway. The gate floor was calibrated
+    /// against this arithmetic; changing it is a recalibration, not a
+    /// refactor.
     pub fn confidence(&self, query_words: &[&str], terms: &[Term]) -> f32 {
         let max_idf = self.idf(0);
         let has_expansions = terms.iter().any(|t| t.expanded);
@@ -291,7 +342,14 @@ impl KeywordIndex {
     /// collapsed (a repeated query term shouldn't count twice), and an
     /// expansion that duplicates a typed word is dropped rather than
     /// double-counted at a lower weight.
+    ///
+    /// The exact term for the final typed word is marked `trailing`, as
+    /// is every expansion: together they form the hypothesis set that
+    /// score_terms maxes over. When the final word produced no
+    /// expansions the set is a singleton and max equals sum, so nothing
+    /// changes for queries where expansion never fired.
     pub fn resolve(&self, query_words: &[&str], expand_last: bool) -> Vec<Term> {
+        let last = query_words.last().copied();
         let mut out: Vec<Term> = Vec::new();
         let mut seen: Vec<&str> = Vec::new();
         for &w in query_words {
@@ -304,11 +362,12 @@ impl KeywordIndex {
                     text: Box::from(w),
                     weight: 1.0,
                     expanded: false,
+                    trailing: Some(w) == last,
                 });
             }
         }
 
-        let Some(&last) = query_words.last() else {
+        let Some(last) = last else {
             return out;
         };
         if !expand_last || last.chars().count() < PREFIX_MIN_CHARS {
@@ -331,21 +390,84 @@ impl KeywordIndex {
                 text: t.clone(),
                 weight: PREFIX_DAMP,
                 expanded: true,
+                trailing: true,
             });
         }
         out
     }
 
-    /// Rank docs for pre-normalized query words, with prefix expansion on
-    /// the trailing term, at the default field weights. Ties break on
-    /// doc id.
-    pub fn rank(&self, query_words: &[&str]) -> Vec<u16> {
-        self.rank_terms(&self.resolve(query_words, true))
+    /// Which documents' titles COVER the query: every distinct typed
+    /// word present in the title, with the trailing word satisfiable by
+    /// any of its expansions (so a half-typed title still covers). The
+    /// tier this feeds is ordinal — see the module header — and a
+    /// document with no title evidence at all can never be covered.
+    ///
+    /// Coverage tests term PRESENCE (posting title tf > 0), not weighted
+    /// score, so it is deliberately orthogonal to the field weights: a
+    /// `--w-title 0` sweep removes title EVIDENCE but not the tier.
+    /// Covered docs with zero total score are still excluded from the
+    /// ranking by rank_from_scores_covered, which bounds that
+    /// interaction: coverage reorders evidence, it never manufactures it.
+    pub fn title_cover(&self, query_words: &[&str], terms: &[Term]) -> Vec<bool> {
+        let n = self.n_docs as usize;
+        let Some(&last) = query_words.last() else {
+            return vec![false; n];
+        };
+        let mut cover = vec![true; n];
+        let mut seen: Vec<&str> = Vec::new();
+        for &w in query_words {
+            if seen.contains(&w) {
+                continue;
+            }
+            seen.push(w);
+            let mut covered_w = vec![false; n];
+            self.mark_title_holders(w, &mut covered_w);
+            if w == last {
+                for t in terms.iter().filter(|t| t.expanded) {
+                    self.mark_title_holders(&t.text, &mut covered_w);
+                }
+            }
+            for (c, cw) in cover.iter_mut().zip(&covered_w) {
+                *c = *c && *cw;
+            }
+        }
+        cover
     }
 
-    /// Rank with expansion disabled — exact terms only.
+    /// Mark docs whose TITLE contains `text`, via the postings' title tf.
+    fn mark_title_holders(&self, text: &str, covered: &mut [bool]) {
+        let Some(postings) = self.terms.get(text) else {
+            return;
+        };
+        for p in postings {
+            if p.title > 0
+                && let Some(c) = covered.get_mut(p.doc as usize)
+            {
+                *c = true;
+            }
+        }
+    }
+
+    /// Rank docs for pre-normalized query words, with prefix expansion on
+    /// the trailing term and the title-cover tier, at the default field
+    /// weights. Ties break on doc id. This is the same pipeline the
+    /// engine runs (resolve → score_terms → title_cover → covered rank),
+    /// with the engine passing its own weights.
+    pub fn rank(&self, query_words: &[&str]) -> Vec<u16> {
+        let terms = self.resolve(query_words, true);
+        let scores = self.score_terms(&terms, FieldWeights::default());
+        let cover = self.title_cover(query_words, &terms);
+        Self::rank_from_scores_covered(&scores, &cover)
+    }
+
+    /// Rank with expansion disabled — exact terms only. The title-cover
+    /// tier still applies (an exactly-typed title is the strongest
+    /// navigational signal there is).
     pub fn rank_exact(&self, query_words: &[&str]) -> Vec<u16> {
-        self.rank_terms(&self.resolve(query_words, false))
+        let terms = self.resolve(query_words, false);
+        let scores = self.score_terms(&terms, FieldWeights::default());
+        let cover = self.title_cover(query_words, &terms);
+        Self::rank_from_scores_covered(&scores, &cover)
     }
 
     /// Per-document scores for resolved terms, densely indexed by doc id.
@@ -354,27 +476,50 @@ impl KeywordIndex {
     /// must rank identically; and the report needs the scores after
     /// ranking, which rank_terms used to throw away.
     ///
+    /// Non-trailing terms SUM (independent evidence from distinct typed
+    /// words). Trailing terms — the final word's hypothesis set, exact
+    /// match included — contribute per doc as a MAX: alternative readings
+    /// of one word are not corroboration, and a doc matching several
+    /// completions has evidence for its best reading, not their total.
+    /// Max is order-independent over f32, so determinism holds without
+    /// the summation-order care the dense layout exists for.
+    ///
     /// The field weights come from the caller (the engine passes its
     /// ScoreOpts) so eval can sweep them without rebuilding the index.
     pub fn score_terms(&self, terms: &[Term], w: FieldWeights) -> Vec<f32> {
-        let mut scores = vec![0f32; self.n_docs as usize];
+        let n = self.n_docs as usize;
+        let mut scores = vec![0f32; n];
+        let mut trailing_best = vec![0f32; n];
         for t in terms {
             let Some(postings) = self.terms.get(&t.text) else {
                 continue;
             };
             let idf = self.idf(postings.len());
             for p in postings {
-                if let Some(s) = scores.get_mut(p.doc as usize) {
-                    *s += t.weight * self.term_score(p, idf, w);
+                let d = p.doc as usize;
+                if d >= n {
+                    continue;
+                }
+                let s = t.weight * self.term_score(p, idf, w);
+                if t.trailing {
+                    if s > trailing_best[d] {
+                        trailing_best[d] = s;
+                    }
+                } else {
+                    scores[d] += s;
                 }
             }
+        }
+        for (s, b) in scores.iter_mut().zip(&trailing_best) {
+            *s += *b;
         }
         scores
     }
 
     /// Order docs by score descending, ties on doc id. Docs with no
     /// evidence (score 0) are excluded, matching the old HashMap behavior
-    /// where they never entered the map.
+    /// where they never entered the map. The tier-less primitive: the
+    /// engine ranks through rank_from_scores_covered instead.
     pub fn rank_from_scores(scores: &[f32]) -> Vec<u16> {
         let mut out: Vec<u16> = (0..scores.len() as u16)
             .filter(|&d| scores[d as usize] > 0.0)
@@ -388,6 +533,37 @@ impl KeywordIndex {
         out
     }
 
+    /// Order docs with the title-cover tier: covered docs ahead of
+    /// uncovered, score descending within each tier, ties on doc id.
+    /// Zero-score docs are excluded even when covered — coverage is a
+    /// reordering claim, never an evidence source, so a doc enters the
+    /// list only on real term evidence. With an all-false cover this is
+    /// byte-identical to rank_from_scores, which is the property that
+    /// makes the tier safe: absence of coverage is exactly yesterday's
+    /// ranking.
+    pub fn rank_from_scores_covered(scores: &[f32], cover: &[bool]) -> Vec<u16> {
+        debug_assert_eq!(scores.len(), cover.len());
+        let mut out: Vec<u16> = (0..scores.len() as u16)
+            .filter(|&d| scores[d as usize] > 0.0)
+            .collect();
+        out.sort_unstable_by(|&a, &b| {
+            let (au, bu) = (a as usize, b as usize);
+            cover[bu]
+                .cmp(&cover[au])
+                .then(
+                    scores[bu]
+                        .partial_cmp(&scores[au])
+                        .unwrap_or(core::cmp::Ordering::Equal),
+                )
+                .then(a.cmp(&b))
+        });
+        out
+    }
+
+    /// Rank resolved terms at the default weights, WITHOUT the tier —
+    /// this signature has no query words to compute cover from. Kept as
+    /// a primitive; callers with the query in hand (rank, rank_exact,
+    /// the engine) go through the covered path.
     pub fn rank_terms(&self, terms: &[Term]) -> Vec<u16> {
         Self::rank_from_scores(&self.score_terms(terms, FieldWeights::default()))
     }
@@ -570,6 +746,19 @@ mod tests {
         KeywordIndex::new(3, terms)
     }
 
+    /// The cli-shaped corpus: doc0 carries the exact term in its body,
+    /// doc1 carries three distinct completions of it, and bodies are
+    /// length-matched so nothing rides on normalization.
+    fn alternatives_index() -> KeywordIndex {
+        let mut terms: HashMap<Box<str>, Vec<Posting>> = HashMap::new();
+        terms.insert(Box::from("cli"), vec![body(0, 2)]);
+        terms.insert(Box::from("client"), vec![body(1, 1)]);
+        terms.insert(Box::from("clientele"), vec![body(1, 1)]);
+        terms.insert(Box::from("clicker"), vec![body(1, 1)]);
+        terms.insert(Box::from("pad"), vec![body(0, 1)]);
+        KeywordIndex::new(2, terms)
+    }
+
     #[test]
     fn rare_term_dominates() {
         assert_eq!(index().rank(&["pydub", "the"])[0], 2);
@@ -638,9 +827,12 @@ mod tests {
     }
 
     #[test]
-    fn tag_hit_outranks_title_hit_at_default_weights() {
+    fn tag_hit_outscores_title_hit_at_default_weights() {
         // W_TAG (4) > W_TITLE (2): a tag is the author's own relevance
-        // signal. Equal tf, equal per-field lengths.
+        // signal. Equal tf, equal per-field lengths. This pins the SCORE
+        // arithmetic; the RANK for this fixture goes the other way,
+        // because the title-cover tier is ordinal and sits above the
+        // weights — see title_cover_outranks_tag_weight below.
         let mut terms: HashMap<Box<str>, Vec<Posting>> = HashMap::new();
         terms.insert(
             Box::from("wasm"),
@@ -651,7 +843,35 @@ mod tests {
             vec![post(0, 3, 1, 0, 10), post(1, 2, 2, 0, 10)],
         );
         let idx = KeywordIndex::new(2, terms);
-        assert_eq!(idx.rank_exact(&["wasm"])[0], 0);
+        let t = idx.resolve(&["wasm"], false);
+        let scores = idx.score_terms(&t, w());
+        assert!(
+            scores[0] > scores[1],
+            "tag evidence must outscore title evidence: {} vs {}",
+            scores[0],
+            scores[1]
+        );
+    }
+
+    #[test]
+    fn title_cover_outranks_tag_weight() {
+        // The deliberate inversion, pinned so it cannot be mistaken for a
+        // bug: the query word sits in doc1's TITLE, so typing it is a
+        // navigational act, and the covered doc ranks first even though
+        // the tag hit SCORES higher (previous test). W_TAG encodes
+        // topical authority; coverage encodes navigational intent; the
+        // navigational claim wins across tiers, the weights decide within.
+        let mut terms: HashMap<Box<str>, Vec<Posting>> = HashMap::new();
+        terms.insert(
+            Box::from("wasm"),
+            vec![post(0, 0, 1, 0, 0), post(1, 1, 0, 0, 0)],
+        );
+        terms.insert(
+            Box::from("filler"),
+            vec![post(0, 3, 1, 0, 10), post(1, 2, 2, 0, 10)],
+        );
+        let idx = KeywordIndex::new(2, terms);
+        assert_eq!(idx.rank_exact(&["wasm"])[0], 1);
     }
 
     #[test]
@@ -716,7 +936,9 @@ mod tests {
     fn weights_are_sweepable_at_query_time() {
         // The same index ranks differently under different weights — the
         // property eval's --w-title sweep depends on. At w_title 0 a
-        // title-only hit carries no evidence and the body hit wins.
+        // title-only hit carries no evidence and the body hit wins: the
+        // doc is still COVERED, but coverage never manufactures evidence,
+        // so a zero-score covered doc drops out of the list entirely.
         let mut terms: HashMap<Box<str>, Vec<Posting>> = HashMap::new();
         terms.insert(
             Box::from("rrf"),
@@ -728,12 +950,14 @@ mod tests {
         );
         let idx = KeywordIndex::new(2, terms);
         let t = idx.resolve(&["rrf"], false);
-        let default = KeywordIndex::rank_from_scores(&idx.score_terms(&t, w()));
-        let no_title = KeywordIndex::rank_from_scores(
+        let cover = idx.title_cover(&["rrf"], &t);
+        let default = KeywordIndex::rank_from_scores_covered(&idx.score_terms(&t, w()), &cover);
+        let no_title = KeywordIndex::rank_from_scores_covered(
             &idx.score_terms(&t, FieldWeights { title: 0.0, ..w() }),
+            &cover,
         );
         assert_eq!(default[0], 0);
-        assert_eq!(no_title[0], 1);
+        assert_eq!(no_title, vec![1]);
     }
 
     // ---- the description field ---------------------------------------
@@ -936,6 +1160,187 @@ mod tests {
             .filter(|t| t.expanded)
             .count();
         assert_eq!(n, PREFIX_MAX_EXPANSIONS);
+    }
+
+    // ---- trailing-word best-of ---------------------------------------
+
+    #[test]
+    fn trailing_terms_are_marked_and_others_are_not() {
+        let idx = prefix_index();
+        let terms = idx.resolve(&["filler", "chro"], true);
+        // "filler" is typed but not last → not trailing; every expansion
+        // of "chro" is trailing.
+        for t in &terms {
+            if t.text.as_ref() == "filler" {
+                assert!(!t.trailing, "non-final typed word must not be trailing");
+            } else {
+                assert!(t.expanded && t.trailing);
+            }
+        }
+        // The exact trailing term is trailing but not expanded.
+        let terms = idx.resolve(&["chromium"], true);
+        let exact = terms
+            .iter()
+            .find(|t| t.text.as_ref() == "chromium")
+            .unwrap();
+        assert!(exact.trailing && !exact.expanded);
+    }
+
+    #[test]
+    fn expansions_are_alternatives_not_corroboration() {
+        // The cli bug as a tripwire: doc1 matches THREE completions of
+        // the trailing word, doc0 matches the word itself. Summing the
+        // damped completions outweighed the exact hit; best-of scores
+        // doc1 as its strongest single reading, and the exact hit wins.
+        let idx = alternatives_index();
+        let terms = idx.resolve(&["cli"], true);
+        assert!(terms.iter().filter(|t| t.expanded).count() >= 3);
+        assert_eq!(
+            idx.rank(&["cli"])[0],
+            0,
+            "a pile of completions must not outrank the word itself"
+        );
+        // And the stronger claim: doc1's score IS its best single
+        // expansion, not the sum. All three expansions are df=1 at equal
+        // tf and equal field lengths, so any one of them alone must
+        // reproduce doc1's full score exactly.
+        let all = idx.score_terms(&terms, w());
+        let single = vec![Term {
+            text: Box::from("client"),
+            weight: PREFIX_DAMP,
+            expanded: true,
+            trailing: true,
+        }];
+        let one = idx.score_terms(&single, w());
+        assert!(
+            (all[1] - one[1]).abs() < 1e-6,
+            "doc1 must score as max over expansions, got {} vs single {}",
+            all[1],
+            one[1]
+        );
+    }
+
+    #[test]
+    fn exact_trailing_competes_in_the_same_set() {
+        // A doc containing the exact trailing word AND a rarer completion
+        // of it is evidence for ONE reading, not two: with the exact hit
+        // the stronger member, adding expansions to the resolve changes
+        // nothing about that doc's score.
+        let mut terms: HashMap<Box<str>, Vec<Posting>> = HashMap::new();
+        terms.insert(Box::from("chromium"), vec![body(0, 4)]);
+        terms.insert(Box::from("chromiumoxide"), vec![body(0, 1)]);
+        let idx = KeywordIndex::new(1, terms);
+        let with = idx.score_terms(&idx.resolve(&["chromium"], true), w());
+        let without = idx.score_terms(&idx.resolve(&["chromium"], false), w());
+        assert!(
+            (with[0] - without[0]).abs() < 1e-6,
+            "expansion must not stack on top of the exact trailing hit: {} vs {}",
+            with[0],
+            without[0]
+        );
+    }
+
+    #[test]
+    fn non_trailing_words_still_sum() {
+        // Distinct typed words remain independent evidence: a doc
+        // matching both scores more than a doc matching either alone.
+        let mut terms: HashMap<Box<str>, Vec<Posting>> = HashMap::new();
+        terms.insert(Box::from("model"), vec![body(0, 1), body(1, 1)]);
+        terms.insert(Box::from("lockfile"), vec![body(0, 1)]);
+        terms.insert(Box::from("pad"), vec![body(1, 1)]);
+        let idx = KeywordIndex::new(2, terms);
+        let scores = idx.score_terms(&idx.resolve(&["model", "lockfile"], false), w());
+        assert!(
+            scores[0] > scores[1],
+            "two-word evidence must sum: {} vs {}",
+            scores[0],
+            scores[1]
+        );
+    }
+
+    // ---- title-cover tier --------------------------------------------
+
+    #[test]
+    fn full_title_cover_outranks_higher_bm25() {
+        // The 8e-6 lesson: doc0 is TITLED with the query word, doc1
+        // merely says it a lot. doc1's raw BM25F score is higher (assert
+        // it, so the test can't pass vacuously), and the covered doc
+        // still ranks first.
+        let mut terms: HashMap<Box<str>, Vec<Posting>> = HashMap::new();
+        terms.insert(
+            Box::from("cli"),
+            vec![post(0, 1, 0, 0, 0), post(1, 0, 0, 0, 6)],
+        );
+        terms.insert(Box::from("filler"), vec![post(1, 0, 0, 0, 4)]);
+        let idx = KeywordIndex::new(2, terms);
+        let t = idx.resolve(&["cli"], false);
+        let scores = idx.score_terms(&t, w());
+        assert!(
+            scores[1] > scores[0],
+            "fixture must make the uncovered doc score higher, got {} vs {}",
+            scores[1],
+            scores[0]
+        );
+        assert_eq!(idx.rank_exact(&["cli"])[0], 0, "coverage must win the rank");
+    }
+
+    #[test]
+    fn cover_requires_every_typed_word() {
+        // Partial title overlap is not coverage: doc1 has one of the two
+        // words in its title and the other in its body.
+        let mut terms: HashMap<Box<str>, Vec<Posting>> = HashMap::new();
+        terms.insert(
+            Box::from("browser"),
+            vec![post(0, 1, 0, 0, 0), post(1, 1, 0, 0, 0)],
+        );
+        terms.insert(
+            Box::from("runtime"),
+            vec![post(0, 1, 0, 0, 0), post(1, 0, 0, 0, 3)],
+        );
+        let idx = KeywordIndex::new(2, terms);
+        let cover = idx.title_cover(&["browser", "runtime"], &[]);
+        assert_eq!(cover, vec![true, false]);
+        assert_eq!(idx.rank_exact(&["browser", "runtime"])[0], 0);
+    }
+
+    #[test]
+    fn typing_toward_a_title_covers_via_expansion() {
+        // Mid-word navigation: the trailing word is a prefix of a title
+        // term, and coverage flows through the expansion, so the tier
+        // works while the user is still typing.
+        let mut terms: HashMap<Box<str>, Vec<Posting>> = HashMap::new();
+        terms.insert(Box::from("chromiumoxide"), vec![post(0, 1, 0, 0, 1)]);
+        terms.insert(Box::from("filler"), vec![post(1, 0, 0, 0, 20)]);
+        let idx = KeywordIndex::new(2, terms);
+        let t = idx.resolve(&["chromiumox"], true);
+        let cover = idx.title_cover(&["chromiumox"], &t);
+        assert_eq!(cover, vec![true, false]);
+        assert_eq!(idx.rank(&["chromiumox"])[0], 0);
+    }
+
+    #[test]
+    fn no_cover_is_pure_bm25_order() {
+        // The safety property: an all-false cover reproduces the plain
+        // ranking byte for byte, so queries the tier doesn't touch score
+        // exactly as they did yesterday.
+        let scores = [0.5f32, 0.0, 2.0, 1.0, 2.0];
+        let none = vec![false; scores.len()];
+        assert_eq!(
+            KeywordIndex::rank_from_scores_covered(&scores, &none),
+            KeywordIndex::rank_from_scores(&scores),
+        );
+    }
+
+    #[test]
+    fn coverage_never_manufactures_evidence() {
+        // A covered doc with zero score stays out of the list: coverage
+        // reorders, it never admits.
+        let scores = [0.0f32, 1.0];
+        let cover = [true, false];
+        assert_eq!(
+            KeywordIndex::rank_from_scores_covered(&scores, &cover),
+            vec![1]
+        );
     }
 
     #[test]
