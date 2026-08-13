@@ -460,6 +460,15 @@ and the best cell is re-run for its per-kind breakdown and failures.")]
         /// alone, k stays at its base value.
         #[arg(long, value_name = "LIST", value_delimiter = ',')]
         sweep_rrf_alpha: Vec<f32>,
+
+        /// Print the full explain for every failing case, inline.
+        ///
+        /// Runs each failure's explain on the SAME engine and scoring
+        /// the pass used — flags and sweep cells included — which the
+        /// suggested standalone command cannot reproduce. In sweep
+        /// mode, applies to the best cell's re-run.
+        #[arg(long)]
+        explain: bool,
     },
 
     /// Emit a shell completion script.
@@ -566,33 +575,33 @@ fn main() -> Result<()> {
             strong_cos,
             rrf_alpha,
             rrf_k,
+            explain,
             sweep_rrf_k,
             sweep_rrf_alpha,
         } => {
             let cfg = load_config(&site)?;
             let dir = artifacts.unwrap_or_else(|| cfg.out.clone());
             let queries = queries.unwrap_or_else(|| cfg.root.join("fixtures/queries.toml"));
-            let args = chops_search::eval::ScoreArgs {
-                min_cos,
-                chunk_penalty,
-                kw_floor,
-                min_gap,
-                strong_cos,
-                w_title,
-                w_tag,
-                w_desc,
-                rrf_alpha,
-                rrf_k,
-            };
-            chops_search::eval::eval(
-                &dir,
-                &queries,
-                kind.as_deref(),
+            let args = chops_search::eval::EvalArgs {
+                kind_filter: kind,
                 fail_under,
-                args,
-                &sweep_rrf_k,
-                &sweep_rrf_alpha,
-            )
+                explain,
+                scoring: chops_search::eval::ScoreArgs {
+                    min_cos,
+                    chunk_penalty,
+                    kw_floor,
+                    min_gap,
+                    strong_cos,
+                    w_title,
+                    w_tag,
+                    w_desc,
+                    rrf_alpha,
+                    rrf_k,
+                },
+                sweep_rrf_k,
+                sweep_rrf_alpha,
+            };
+            chops_search::eval::eval(&dir, &queries, &args)
         }
         Cmd::Model { action } => {
             let cfg = load_config(&site)?;

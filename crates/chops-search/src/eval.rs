@@ -187,17 +187,37 @@ impl ScoreArgs {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn eval(
-    artifacts: &Path,
-    queries: &Path,
-    kind_filter: Option<&str>,
-    fail_under: f32,
-    args: ScoreArgs,
-    sweep_rrf_k: &[f32],
-    sweep_rrf_alpha: &[f32],
-) -> Result<()> {
-    let cases = load_cases(queries, kind_filter)?;
+/// Everything one eval run needs beyond the artifacts and the case
+/// file, as named fields rather than a parade of positional parameters.
+/// Same transposition argument as ScoringFlags: `fail_under` and a
+/// sweep value are both f32-shaped, clap names them at the flag layer,
+/// and nothing protects the order once main.rs forwards them.
+#[derive(Debug, Default, Clone)]
+pub struct EvalArgs {
+    pub kind_filter: Option<String>,
+    pub fail_under: f32,
+    /// Print the full explain for every failure, inline, on this run's
+    /// own engine — flags applied, sweep cells included.
+    pub explain: bool,
+    pub scoring: ScoreArgs,
+    pub sweep_rrf_k: Vec<f32>,
+    pub sweep_rrf_alpha: Vec<f32>,
+}
+
+/// The engine plus the artifact bytes it was constructed from. One
+/// struct because they are one thing: print_report's display inputs
+/// must be the bytes behind the engine that ranked, and four separate
+/// parameters are exactly how a call site pairs an engine with someone
+/// else's index — the stale-artifact bug as an API shape.
+struct EvalCtx<'a> {
+    engine: &'a mut Engine,
+    meta_bytes: &'a [u8],
+    index_bytes: &'a [u8],
+    rows_bytes: &'a [u8],
+}
+
+pub fn eval(artifacts: &Path, queries: &Path, args: &EvalArgs) -> Result<()> {
+    let cases = load_cases(queries, args.kind_filter.as_deref())?;
     if cases.is_empty() {
         bail!("no cases matched (check --kind)");
     }
@@ -216,9 +236,9 @@ pub fn eval(
     // would silently reset the floor to its 256-dim value and the
     // weights to the compiled-in constants on any run that passes only
     // --chunk-penalty.
-    let opts = args.apply(engine.score_opts());
+    let opts = args.scoring.apply(engine.score_opts());
     engine.set_score_opts(opts);
-    println!("scoring:   {}", args.describe(&opts));
+    println!("scoring:   {}", args.scoring.describe(&opts));
     engine
         .ingest(0, &prefix_bytes)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -257,61 +277,87 @@ pub fn eval(
     println!(
         "cases:   {} {}\n",
         cases.len(),
-        kind_filter.map_or(String::new(), |k| format!("(kind = {k})"))
+        args.kind_filter
+            .as_deref()
+            .map_or(String::new(), |k| format!("(kind = {k})"))
     );
 
-    if !sweep_rrf_k.is_empty() || !sweep_rrf_alpha.is_empty() {
-        // Gating an exploration would be meaningless: half the grid is
-        // supposed to be worse than the baseline, that's what a sweep is.
-        if fail_under > 0.0 {
+    let mut ctx = EvalCtx {
+        engine: &mut engine,
+        meta_bytes: &meta_bytes,
+        index_bytes: &index_bytes,
+        rows_bytes: &rows_bytes,
+    };
+
+    if !args.sweep_rrf_k.is_empty() || !args.sweep_rrf_alpha.is_empty() {
+        if args.fail_under > 0.0 {
             println!("note: --fail-under is ignored in sweep mode\n");
         }
         return sweep(
-            &mut engine,
+            &mut ctx,
             &cases,
-            &rows_bytes,
             opts,
-            sweep_rrf_k,
-            sweep_rrf_alpha,
+            &args.sweep_rrf_k,
+            &args.sweep_rrf_alpha,
+            args.explain,
         );
     }
 
-    let pass = run_pass(&mut engine, &cases, &rows_bytes, true)?;
+    let pass = run_pass(&mut ctx, &cases, true)?;
     print_summary(&pass);
     print_bytes(&pass);
-    print_failures(&pass);
+    print_failures(&pass, !args.explain);
+    if args.explain {
+        print_explains(&mut ctx, &pass)?;
+    }
 
     let score = pct(pass.overall.hit1, pass.overall.n) / 100.0;
-    if score < fail_under {
+    if score < args.fail_under {
         bail!(
             "recall@1 {:.0}% below --fail-under {:.0}%",
             score * 100.0,
-            fail_under * 100.0
+            args.fail_under * 100.0
         );
     }
     Ok(())
 }
 
+/// Grade one case's results. Negative controls (empty expect) invert
+/// the test and pass only when nothing comes back, at BOTH depths:
+/// "the junk was only at rank 3" is not partial credit for a query
+/// that should return nothing.
+fn judge(expect: &[String], urls: &[String]) -> (bool, bool) {
+    if expect.is_empty() {
+        let clean = urls.is_empty();
+        (clean, clean)
+    } else {
+        (
+            urls.first().is_some_and(|u| expect.contains(u)),
+            urls.iter().any(|u| expect.contains(u)),
+        )
+    }
+}
+
 /// Run every case through the engine over the real byte path, under
 /// whatever ScoreOpts the engine currently holds. Verbose prints the
 /// per-case PASS/top3/FAIL lines; sweep mode runs quiet.
-fn run_pass(engine: &mut Engine, cases: &[Case], rows_bytes: &[u8], verbose: bool) -> Result<Pass> {
+fn run_pass(ctx: &mut EvalCtx, cases: &[Case], verbose: bool) -> Result<Pass> {
     let mut pass = Pass::default();
 
     for case in cases {
         // Range-fetch simulation: the plan decides, we slice, engine ingests.
         let mut bytes_this_query = 0u64;
-        for r in engine.plan(&case.q) {
+        for r in ctx.engine.plan(&case.q) {
             let (start, end) = (r.start as usize, r.end as usize);
-            if end > rows_bytes.len() {
+            if end > ctx.rows_bytes.len() {
                 bail!(
                     "plan asked for bytes {start}..{end} of a {}-byte rows file",
-                    rows_bytes.len()
+                    ctx.rows_bytes.len()
                 );
             }
             bytes_this_query += (end - start) as u64;
-            engine
-                .ingest(r.start, &rows_bytes[start..end])
+            ctx.engine
+                .ingest(r.start, &ctx.rows_bytes[start..end])
                 .map_err(|e| anyhow::anyhow!("ingest at {start}: {e}"))?;
         }
         if bytes_this_query > 0 {
@@ -319,21 +365,14 @@ fn run_pass(engine: &mut Engine, cases: &[Case], rows_bytes: &[u8], verbose: boo
         }
         pass.fetched.push(bytes_this_query);
 
-        let ids = engine.search(&case.q, 3);
+        let ids = ctx.engine.search(&case.q, 3);
         let urls: Vec<String> = ids
             .iter()
-            .map(|&id| engine.doc_url(id).unwrap_or("<missing>").to_string())
+            .map(|&id| ctx.engine.doc_url(id).unwrap_or("<missing>").to_string())
             .collect();
 
         // Negative controls invert the test: nothing should come back.
-        let (hit1, hit3) = if case.expect.is_empty() {
-            (urls.is_empty(), urls.is_empty())
-        } else {
-            (
-                urls.first().is_some_and(|u| case.expect.contains(u)),
-                urls.iter().any(|u| case.expect.contains(u)),
-            )
-        };
+        let (hit1, hit3) = judge(&case.expect, &urls);
 
         let t = pass.by_kind.entry(case.kind.clone()).or_default();
         t.n += 1;
@@ -360,7 +399,7 @@ fn run_pass(engine: &mut Engine, cases: &[Case], rows_bytes: &[u8], verbose: boo
                 case.kind,
                 truncate(&case.q, 44),
                 urls.first().map_or("(no results)", String::as_str),
-                if engine.used_semantic() {
+                if ctx.engine.used_semantic() {
                     "hybrid"
                 } else {
                     "kw"
@@ -382,12 +421,12 @@ fn run_pass(engine: &mut Engine, cases: &[Case], rows_bytes: &[u8], verbose: boo
 /// failure list — that pass is warm, so it re-scores rather than
 /// re-fetches, and its numbers are the same pass that won the grid.
 fn sweep(
-    engine: &mut Engine,
+    ctx: &mut EvalCtx,
     cases: &[Case],
-    rows_bytes: &[u8],
     base: ScoreOpts,
     ks: &[f32],
     alphas: &[f32],
+    explain: bool,
 ) -> Result<()> {
     let ks: Vec<f32> = if ks.is_empty() {
         vec![base.rrf_k]
@@ -418,8 +457,8 @@ fn sweep(
             let mut o = base;
             o.rrf_k = k;
             o.rrf_alpha = a;
-            engine.set_score_opts(o);
-            let p = run_pass(engine, cases, rows_bytes, false)?;
+            ctx.engine.set_score_opts(o);
+            let p = run_pass(ctx, cases, false)?;
             print!(
                 "{:>13}",
                 format!(
@@ -451,10 +490,15 @@ fn sweep(
     let mut o = base;
     o.rrf_k = k;
     o.rrf_alpha = a;
-    engine.set_score_opts(o);
-    let p = run_pass(engine, cases, rows_bytes, false)?;
+    ctx.engine.set_score_opts(o);
+    let p = run_pass(ctx, cases, false)?;
     print_summary(&p);
-    print_failures(&p);
+    print_failures(&p, !explain);
+    if explain {
+        // The engine holds the best cell's opts right now — the state
+        // no standalone command can reproduce.
+        print_explains(ctx, &p)?;
+    }
     println!(
         "\nlock in alpha: set `rrf_alpha = {a}` in chops-search.toml and rebuild — \
          the value then reaches the browser, CI, and a bare eval alike.\n\
@@ -504,18 +548,44 @@ fn print_bytes(pass: &Pass) {
     );
 }
 
-fn print_failures(pass: &Pass) {
+/// The failure list as a string, so the hint-suppression rule is
+/// testable without capturing stdout. The standalone-command hint is
+/// dropped when inline explains follow: the hint reproduces neither
+/// the flags nor a sweep cell, and printing it above the better tool's
+/// output would recommend the worse one.
+fn format_failures(pass: &Pass, hint: bool) -> String {
     if pass.failures.is_empty() {
-        return;
+        return String::new();
     }
-    println!("\nfailures:");
+    let mut out = String::from("\nfailures:\n");
     for (kind, q, urls) in &pass.failures {
-        println!("  [{kind}] {q:?}");
+        out.push_str(&format!("  [{kind}] {q:?}\n"));
         for (i, u) in urls.iter().enumerate() {
-            println!("      {}. {u}", i + 1);
+            out.push_str(&format!("      {}. {u}\n", i + 1));
         }
-        println!("      explain: cargo run -p chops-search --release -- query {q:?}");
+        if hint {
+            out.push_str(&format!(
+                "      explain: cargo run -p chops-search --release -- query {q:?}\n"
+            ));
+        }
     }
+    out
+}
+
+fn print_failures(pass: &Pass, hint: bool) {
+    print!("{}", format_failures(pass, hint));
+}
+
+/// Inline explains on eval's own engine, whose opts print_report reads
+/// back rather than receiving. Rows are fully warm by the time any
+/// failure exists. Limit 5, not query's 20: the diagnostic action is
+/// the top handful plus the gate and floor lines.
+fn print_explains(ctx: &mut EvalCtx, pass: &Pass) -> Result<()> {
+    for (kind, q, _) in &pass.failures {
+        println!("\n──── explain [{kind}] {q:?} ────");
+        crate::explain::print_report(ctx.engine, ctx.meta_bytes, ctx.index_bytes, q, 5)?;
+    }
+    Ok(())
 }
 
 fn pct(hit: usize, n: usize) -> f32 {
@@ -536,10 +606,14 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-/// Parse the labeled set. Hand-navigated rather than serde-derived: the
-/// schema is four fields and this keeps serde out of the dependency tree.
 fn load_cases(path: &Path, kind_filter: Option<&str>) -> Result<Vec<Case>> {
     let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    parse_cases(&text, kind_filter).with_context(|| format!("in {}", path.display()))
+}
+
+/// Parse the labeled set. Hand-navigated rather than serde-derived: the
+/// schema is four fields and this keeps serde out of the dependency tree.
+fn parse_cases(text: &str, kind_filter: Option<&str>) -> Result<Vec<Case>> {
     let doc: toml::Table = text.parse().context("query set is not valid TOML")?;
     let arr = doc
         .get("query")
@@ -778,5 +852,80 @@ mod tests {
 
         let clean = ScoreArgs::default().describe(&base());
         assert!(!clean.contains('*'), "no flags, no markers: {clean}");
+    }
+
+    // ---- grading -----------------------------------------------------
+
+    #[test]
+    fn negative_controls_invert_at_both_depths() {
+        let none: Vec<String> = vec![];
+        assert_eq!(judge(&none, &[]), (true, true));
+        // Junk at rank 3 is a full failure, not a recall@1-only one.
+        let junk = vec!["/a/".to_string()];
+        assert_eq!(judge(&none, &junk), (false, false));
+    }
+
+    #[test]
+    fn hit1_needs_first_place_hit3_any_podium() {
+        let expect = vec!["/right/".to_string()];
+        let first = vec!["/right/".to_string(), "/other/".to_string()];
+        assert_eq!(judge(&expect, &first), (true, true));
+        let third = vec!["/a/".to_string(), "/b/".to_string(), "/right/".to_string()];
+        assert_eq!(judge(&expect, &third), (false, true));
+        assert_eq!(judge(&expect, &[]), (false, false));
+    }
+
+    // ---- fixture parsing ----------------------------------------------
+
+    #[test]
+    fn empty_expect_is_a_negative_missing_expect_is_an_error() {
+        // Present-but-empty is the negative-control encoding; absent is
+        // a typo. The distinction is the whole reason expect is required.
+        let ok = parse_cases("[[query]]\nq = \"x\"\nexpect = []\n", None).unwrap();
+        assert_eq!(ok.len(), 1);
+        assert!(ok[0].expect.is_empty());
+        assert!(parse_cases("[[query]]\nq = \"x\"\n", None).is_err());
+    }
+
+    #[test]
+    fn kind_filter_selects_and_absent_kind_defaults_to_unlabeled() {
+        let text = "[[query]]\nq = \"a\"\nexpect = [\"/a/\"]\nkind = \"exact\"\n\
+                    [[query]]\nq = \"b\"\nexpect = [\"/b/\"]\n";
+        let all = parse_cases(text, None).unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[1].kind, "unlabeled");
+        let filtered = parse_cases(text, Some("exact")).unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].q, "a");
+    }
+
+    // ---- failure output -----------------------------------------------
+
+    fn one_failure() -> Pass {
+        Pass {
+            failures: vec![(
+                "exact".into(),
+                "model2vec-rs".into(),
+                vec!["/wrong/".into()],
+            )],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn failure_hint_is_suppressed_when_explains_follow() {
+        // The hint reproduces neither flags nor sweep cells; printing it
+        // above an inline explain would recommend the worse tool.
+        let with = format_failures(&one_failure(), true);
+        assert!(with.contains("explain: cargo run"), "{with}");
+        let without = format_failures(&one_failure(), false);
+        assert!(without.contains("model2vec-rs"), "{without}");
+        assert!(!without.contains("cargo run"), "{without}");
+        assert!(format_failures(&Pass::default(), true).is_empty());
+    }
+
+    #[test]
+    fn pct_of_an_empty_set_is_zero_not_nan() {
+        assert_eq!(pct(0, 0), 0.0);
     }
 }

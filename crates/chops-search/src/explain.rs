@@ -5,6 +5,15 @@
 //! ranking: keyword scores with the fields they came from, best-chunk
 //! cosine, chunk count, and each engine's RRF contribution per document.
 //!
+//! Split in two on purpose: `explain` owns loading and configuration,
+//! `print_report` owns the printing, against an engine that is already
+//! constructed, configured, and row-warm. The split exists for
+//! `eval --explain`, which prints failures on ITS engine — the one
+//! holding the exact ScoreOpts of the pass that failed, including a
+//! sweep's best cell, which exists nowhere but in that engine. A version
+//! of this that constructed its own engine would explain a similar
+//! configuration, not the one that produced the failure.
+//!
 //! Keyword scoring goes through `KeywordIndex::idf`/`term_score`, so it
 //! cannot drift from the ranker — it did once, when BM25 landed here a
 //! commit later than in core. The fusion weight is read off the report
@@ -16,7 +25,10 @@
 //! not per-doc field tfs, and the engine's keyword index is private. With
 //! BM25F, "which field did this term turn up in" is the first question
 //! worth asking about a surprising ranking, so it's worth the second
-//! parse of a file already in memory.
+//! parse of a file already in memory. `print_report` takes those bytes
+//! as a parameter for the same reason it takes the engine: the caller
+//! knows which artifact is loaded, and this function must not resolve a
+//! possibly-different one.
 
 use std::collections::HashMap;
 use std::fs;
@@ -26,6 +38,7 @@ use crate::eval::ScoreArgs;
 use anyhow::{Context, Result};
 use chops_search_core::engine::{Engine, SemanticStatus};
 use chops_search_core::format::{Index, ModelMeta};
+use chops_search_core::score::ScoreOpts;
 use chops_search_core::wordpiece::Vocab;
 
 /// List indexed documents with their URLs — what you need to write
@@ -62,6 +75,10 @@ impl FieldTotals {
     }
 }
 
+/// The `chops-search query` entry point: resolve artifacts, build and
+/// configure an engine, load the whole matrix, then hand off to
+/// `print_report`. Everything below the ingest is shared with
+/// `eval --explain`.
 pub fn explain(artifacts: &Path, query: &str, limit: usize, args: ScoreArgs) -> Result<()> {
     let a = crate::artifacts::resolve(artifacts)?;
     let meta_bytes = fs::read(&a.meta).with_context(|| format!("{}", a.meta.display()))?;
@@ -84,11 +101,40 @@ pub fn explain(artifacts: &Path, query: &str, limit: usize, args: ScoreArgs) -> 
         engine.dim()
     );
     println!("scoring:   {}", args.describe(&opts));
+
+    print_report(&mut engine, &meta_bytes, &index_bytes, query, limit)
+}
+
+/// Print the full evidence behind one query against an engine that is
+/// already constructed, configured, and row-warm. Prints no scoring
+/// header: the caller owns the configuration story (`explain` prints it
+/// once per invocation, eval once per pass), and a per-query restatement
+/// would imply the configuration could differ between failures of the
+/// same pass, which is exactly what sharing the engine rules out.
+///
+/// `meta_bytes` and `index_bytes` are display inputs — the wordpiece
+/// split and the per-field tfs — and must be the bytes the engine was
+/// constructed from. Taking them as parameters rather than re-resolving
+/// keeps this function incapable of explaining a different artifact
+/// than the one that ranked.
+pub fn print_report(
+    engine: &mut Engine,
+    meta_bytes: &[u8],
+    index_bytes: &[u8],
+    query: &str,
+    limit: usize,
+) -> Result<()> {
+    // The engine's opts, read back rather than passed alongside: a
+    // (engine, opts) pair where the two disagree is unrepresentable
+    // this way, and the gate/floor lines below must print the numbers
+    // the ranking actually used.
+    let opts: ScoreOpts = engine.score_opts();
+
     println!("query:     {query:?}");
 
     // Vocab rebuilt only to SHOW the wordpiece split; the engine
     // tokenizes with its own copy. Display, not arithmetic.
-    let meta = ModelMeta::read(&meta_bytes).context("parsing model.meta.bin")?;
+    let meta = ModelMeta::read(meta_bytes).context("parsing model.meta.bin")?;
     let vocab = Vocab::from_tokens(&meta.tokens);
     let pieces: Vec<&str> = vocab
         .tokenize(query)
@@ -154,7 +200,7 @@ pub fn explain(artifacts: &Path, query: &str, limit: usize, args: ScoreArgs) -> 
     // report knows df but not where in a document a term landed, and
     // under BM25F that's the difference between a title match and a
     // passing mention in paragraph nine.
-    let index = Index::read(&index_bytes).context("parsing index")?;
+    let index = Index::read(index_bytes).context("parsing index")?;
     let postings: HashMap<&str, _> = index
         .terms
         .iter()
@@ -208,8 +254,8 @@ pub fn explain(artifacts: &Path, query: &str, limit: usize, args: ScoreArgs) -> 
     // rather than recomputing per-doc keeps that restatement to a
     // formula the reader can check the columns against.
     println!(
-        "fused:     {:.2}/(60+kw#) + 1/(60+sem#)",
-        report.kw_rrf_weight
+        "fused:     {:.2}/({:.0}+kw#) + 1/({:.0}+sem#)",
+        report.kw_rrf_weight, opts.rrf_k, opts.rrf_k
     );
     println!(
         "{:<4} {:>8} {:>4} {:>9} {:>11} {:>5} {:>9} {:>8} {:>7}  title",
