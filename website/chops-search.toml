@@ -2,16 +2,13 @@
 #
 # Paths resolve relative to THIS file, so `chops-search build` works from
 # anywhere inside the site.
-
 content = "content"
 out     = "static/search"
 model   = ".chops-search/model"
-
 # PCA target. The model's native size is 256; 128 halves the eager prefix
 # and every per-query range fetch. Re-run `chops-search eval` after
 # changing it — dimensionality reduction is real information loss.
 dims = 128
-
 # BM25F field weights: what a length-normalised occurrence in each field
 # is worth against one in the body. Each field's term frequency is divided
 # by that field's OWN average length before these apply, and saturation
@@ -27,9 +24,43 @@ dims = 128
 # These are query-time knobs, so sweep them against a built index rather
 # than guessing: `chops-search eval --w-title 1 --w-desc 0` needs no
 # rebuild. Only the value committed here reaches the browser.
-# title_weight = 2
-# tag_weight   = 4
-# desc_weight  = 1
+title_weight = 2
+tag_weight   = 4
+desc_weight  = 1
+chunk_chars = 600
+prefix_rows = 2048
 
-# chunk_chars = 600
-# prefix_rows = 2048
+# Scoring calibration. Unlike the weights above, these three are baked
+# into index.bin at build time and read by the engine at construction,
+# so the value committed here is the value every visitor's browser runs
+# — and a bare `chops-search eval` measures the same configuration.
+#
+# They ship commented out because they are CALIBRATED, not chosen: a
+# value that helps one corpus hurts another, and uncommenting an example
+# without measuring is shipping someone else's calibration. The loop is:
+# sweep with `chops-search eval` against a labeled fixture set, verify
+# the mechanism with `chops-search query --explain`, then pin the
+# winning value here and rebuild.
+#
+# min_gap: the corroboration gate. When a query has no keyword evidence
+# and no document stands out from the pack by at least this much (best
+# cosine minus corpus median), the semantic ranking is suppressed rather
+# than served — the flat-field signature is noise on a single-topic
+# corpus. 0 disarms the gate, which is the compiled default.
+# Sweep: chops-search eval --min-gap
+min_gap = 0.08
+#
+# rrf_alpha: confidence-weighted fusion. The keyword list's RRF vote
+# scales by 1 + rrf_alpha × the fraction of the query's idf mass it
+# matched, so an exact rare-term hit can outvote a merely-adjacent
+# semantic first place, while stopword-heavy queries fuse as plain RRF.
+# 0 is plain RRF, the compiled default.
+# Sweep: chops-search eval --rrf-alpha
+rrf_alpha = 1.0
+#
+# min_cos: the semantic relevance floor, as an OVERRIDE. Leave this
+# commented and the engine derives the floor from `dims`, which is right
+# for almost every corpus and tracks dims changes automatically. Pin it
+# only if a sweep said so — a value calibrated at one dims is wrong at
+# another — and note 0 is itself an override, meaning "floor off".
+min_cos = 0.34
