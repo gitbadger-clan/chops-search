@@ -19,7 +19,10 @@ chops-search model fetch
 This resolves the model repo's default branch to a concrete commit, downloads
 the model files into `.chops-search/model/`, and writes
 `.chops-search/model.lock.json` beside it, recording the revision and a hash
-of every file.
+of every file. The default repo is `minishlab/potion-base-8M`; any model2vec
+repo works as a positional argument
+(`chops-search model fetch minishlab/potion-base-4M`), the listed default is
+the tested one.
 
 **Commit the lockfile. Ignore the directory.** `chops-search init` writes
 exactly those gitignore entries. The lockfile is what makes a model fetch
@@ -46,9 +49,13 @@ upstream is down.
 
 ## Changing `dims`
 
-`dims` in `chops-search.toml` (default 128; the model's native size is 256)
-sets the PCA target dimensionality. Halving dims halves the eager prefix and
-every per-query range fetch, at some cost in recall.
+`dims` in `chops-search.toml` sets the PCA target dimensionality. Unset, it
+means the model's native size (256 for potion-base-8M); the scaffolded
+config pins `dims = 128`, which halves the eager prefix and every per-query
+range fetch, at some cost in recall. Leaving it unset keeps native
+dimensionality, and that being spellable is the point of the default: a
+compiled 128 would make "native" unsayable and turn a per-site calibration
+into a silent product default.
 
 Two things to know before touching it:
 
@@ -57,9 +64,12 @@ Two things to know before touching it:
   and naive column truncation would be silently wrong. chops-search re-runs
   PCA on the token matrix at build time.
 - **The relevance floor scales with it.** The floor that lets empty results
-  happen is calibrated at native dimensionality and scaled by √(256/dim), so
-  changing dims changes what counts as "related enough". Dimensionality
-  reduction is real information loss.
+  happen is calibrated at native dimensionality (0.20) and scaled by
+  √(256/dim), so at `dims = 128` the derived floor is about 0.28. Changing
+  dims changes what counts as "related enough"; dimensionality reduction is
+  real information loss. A `min_cos` key in the config pins the floor
+  explicitly instead, and precisely because a value calibrated at one dims
+  is wrong at another, leave it unset unless a sweep said otherwise.
 
 So the procedure is: change the value, `chops-search build`, then
 `chops-search eval` against your labelled set before shipping. If you don't

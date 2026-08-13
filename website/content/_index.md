@@ -28,14 +28,14 @@ variant = "minimal"
 
 `chops-search` is hybrid keyword + semantic search for static sites, running
 entirely in the browser. The "model" is a model2vec/potion int8 lookup table
-streamed over HTTP range requests, so a query costs about 0.2 KB on average
+streamed over HTTP range requests, so a query costs about 0.9 KB on average
 rather than the tens of megabytes a transformer would. Try it right now: the
 search on this site is chops-search, indexing these docs. Press `Cmd-K` (or
 `/`) and phrase a question in words the pages don't use.
 
 {% cardgrid() %}
 {% card(title="Hybrid ranking", icon="setting") %}
-BM25 keyword scores fused with semantic cosine similarity. The two engines
+BM25F keyword scores fused with semantic cosine similarity. The two engines
 fail differently, which is the whole point.
 {% end %}
 {% card(title="Range-fetched model", icon="external") %}
@@ -56,7 +56,8 @@ and `--fail-under` makes CI enforce it.
 
 - **Runs entirely in the browser**: no search server, no API key, no request leaves the page except range fetches against static files.
 - **Understands paraphrase**: semantic matching finds "context packing" when you searched "fitting a repo into a prompt".
-- **Returns nothing for nonsense**: a relevance floor suppresses confident-looking garbage when nothing in your corpus answers the query.
+- **Returns nothing for nonsense**: a relevance floor and a corroboration gate suppress confident-looking garbage when nothing in your corpus answers the query.
 - **[Zola conventions honoured](/reference/indexing-rules/)**: drafts, `in_search_index`, slug and path overrides, page bundles, date-prefixed filenames.
-- **Cache-friendly by construction**: content-hashed artifacts under immutable headers; a content change touches two files and the model stays cache-hot.
+- **Cache-friendly by construction**: content-hashed artifacts under immutable headers, byte-stable builds, so an unchanged site redeploys with every cache still warm.
+- **Calibrated in the open**: the scoring configuration is baked into the index at build time, so the browser, a bare `eval`, and CI all measure the same thing.
 - **[Designed degradation](/explanations/designed-degradation/)**: offline or range-hostile hosts degrade to keyword-only or eager loading, never to wrong results.

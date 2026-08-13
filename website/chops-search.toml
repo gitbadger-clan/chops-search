@@ -12,10 +12,24 @@ model   = ".chops-search/model"
 # changing it — dimensionality reduction is real information loss.
 dims = 128
 
-# Term-frequency weights. Tags are the author's own statement of what a
-# page is about, so they outweigh the title, which outweighs body text.
+# BM25F field weights: what a length-normalised occurrence in each field
+# is worth against one in the body. Each field's term frequency is divided
+# by that field's OWN average length before these apply, and saturation
+# happens once on the combined value, so a weight biases without
+# inflating. The useful range is therefore much smaller than a plain
+# multiplier's would be. 0 ignores a field entirely.
+#
+# Tags are the author's own statement of what a page is about, so they
+# outweigh the title, which outweighs body text. `description` sits at
+# parity with body: it is indexed because it is written in the register
+# searchers phrase questions in, but it measured no better weighted up.
+#
+# These are query-time knobs, so sweep them against a built index rather
+# than guessing: `chops-search eval --w-title 1 --w-desc 0` needs no
+# rebuild. Only the value committed here reaches the browser.
 # title_weight = 2
 # tag_weight   = 4
+# desc_weight  = 1
 
 # chunk_chars = 600
 # prefix_rows = 2048

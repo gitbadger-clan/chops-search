@@ -1,9 +1,9 @@
 +++
 title = "Evaluate Your Search"
-description = "Write a labelled query set for your own corpus, measure recall, diagnose misses with the query command, and gate regressions in CI."
+description = "Write a labelled query set for your own corpus, measure recall, diagnose misses with the query command, calibrate the scoring knobs, and gate regressions in CI."
 weight = 2
 [taxonomies]
-tags = ["evaluation", "recall", "regression-testing", "ci"]
+tags = ["evaluation", "recall", "regression-testing", "ci", "calibration"]
 +++
 
 {% aside(kind="note", title="Tutorial Overview") %}
@@ -75,11 +75,12 @@ chops-search build   # eval scores the artifacts on disk, so build first
 chops-search eval
 ```
 
-You get a PASS/FAIL line per case, recall@1 and recall@3 by kind, real
-bytes-per-query numbers, and for each failure the top 3 it returned instead.
-The eval drives the actual engine over the actual byte path (plan,
-range-fetch, ingest, search), so a bug in the loading logic shows up as a
-recall drop instead of hiding.
+You get a `scoring:` line stating exactly which configuration is being
+measured (the values baked into `index.bin`, plus any flags), a PASS/FAIL
+line per case, recall@1 and recall@3 by kind, real bytes-per-query numbers,
+and for each failure the top 3 it returned instead. The eval drives the
+actual engine over the actual byte path (plan, range-fetch, ingest, search),
+so a bug in the loading logic shows up as a recall drop instead of hiding.
 
 ## 4. Diagnose a miss
 
@@ -90,10 +91,11 @@ chops-search query "the failing query"
 ```
 
 This prints the evidence behind the ranking: how the query tokenized on both
-sides, per-term keyword scores with document frequencies, best-chunk cosine
-per document, and each engine's contribution to the fused order. When a result
-looks wrong the answer is almost always visible in the chunk count or the term
-frequencies. Three patterns account for most misses:
+sides, per-term keyword scores with document frequencies and per-field term
+frequencies, best-chunk cosine per document, and each engine's contribution
+to the fused order. When a result looks wrong the answer is almost always
+visible in the chunk count or in which field the term turned up in. Three
+patterns account for most misses:
 
 - **The expectation is wrong.** The "wrong" winner genuinely answers the
   query. Fix the fixture, not the engine.
@@ -103,7 +105,26 @@ frequencies. Three patterns account for most misses:
   matches no documents while a common one scores. That's a ranking issue
   worth filing.
 
-## 5. Gate it in CI
+## 5. Calibrate, if a sweep says so
+
+Every scoring knob has an `eval` flag, so sweeping needs no rebuild: the
+flags override what `index.bin` baked, for that run only. The fusion pair
+even has a grid mode:
+
+```sh
+chops-search eval --sweep-rrf-k 2,4,8,16,32,60 --sweep-rrf-alpha 0,0.5,1,2
+```
+
+This runs the full case set once per cell, prints recall per cell, and
+re-runs the best cell for its per-kind breakdown. The loop for any knob is:
+sweep with `eval`, verify the mechanism behind a winning value with
+`chops-search query` (a cell can win by coincidence; the explain output
+shows whether the parameter did what you think it did), then pin the value
+in `chops-search.toml` and rebuild. Only the committed, rebuilt value
+reaches the browser; the [configuration reference](/reference/configuration/)
+covers which keys bake where.
+
+## 6. Gate it in CI
 
 ```sh
 chops-search eval --fail-under 0.85
@@ -115,10 +136,11 @@ in a small set doesn't fail the build. Then wire it into your
 [deploy workflow](/how-to/reindex-in-ci/) so a new post that quietly wrecks
 ranking becomes a red build instead of a discovery three weeks later.
 
-{% aside(kind="caution", title="Upgrades can shift ranking without a rebuild") %}
-Scoring thresholds are applied at query time, so upgrading the binary can
-change live ranking with no content change. The eval gate is what turns that
-from a surprise into a checked assertion: re-run it before trusting a new
-version, and when sweeping thresholds, `eval --min-cos` and
-`--chunk-penalty` let you try values without editing anything.
+{% aside(kind="caution", title="A bare eval measures what ships") %}
+The scoring configuration is baked into `index.bin` at build time and read
+by the engine at construction, so `chops-search eval` with no flags measures
+exactly what visitors' browsers run, and the recorded pass rate is only
+valid at the configuration it was measured under. Upgrading the binary can
+still shift compiled defaults, so re-run the gate before trusting a new
+version; it's what turns that from a surprise into a checked assertion.
 {% end %}

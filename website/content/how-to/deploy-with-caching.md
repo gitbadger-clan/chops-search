@@ -49,6 +49,12 @@ natively; so does Netlify):
 ```
 {% end %}
 
+The globs also cover the `.gz` siblings the build writes next to the eager
+artifacts. Those exist because most hosts only compress a fixed list of
+content types that doesn't include `application/octet-stream`; the worker
+fetches the `.gz` directly and decompresses in the browser, so the eager
+payload ships small without any host-side compression rule.
+
 The wasm under `/search/pkg/` is unhashed on disk but always requested with
 `?v=<build hash>` by the worker, so pinning it is safe: a rebuild changes the
 query string and therefore the browser's cache key. And a stale page script
@@ -82,14 +88,16 @@ curl -sI https://your.site/search/manifest.json | grep -i cache-control
    defined directive that omits it silently blocks the range fetches.
 3. **Range requests.** Cloudflare, Netlify, and S3 honour them; some dev
    servers don't (`zola serve` included). The worker tolerates a
-   200-instead-of-206 by ingesting the whole file, so a range-hostile host
-   degrades to eager loading rather than breaking. Test range behaviour
-   against a real preview deploy, and read the network tab: per-query
-   requests should be partial responses of a kilobyte or less.
+   200-instead-of-206 by ingesting the whole file once, so a range-hostile
+   host degrades to eager loading rather than breaking; it also remembers the
+   hostility for the session, so later queries skip ranges instead of paying
+   the fallback again. Test range behaviour against a real preview deploy,
+   and read the network tab: per-query requests should be partial responses
+   of a kilobyte or less.
 
 {% aside(kind="tip", title="What a healthy deploy looks like") %}
 First visit: the eager artifacts and wasm load once. Every query after that:
 either no network at all (prefix hit or warm row cache) or one or two range
-requests around 0.1 KB. If you see the full row matrix downloading per query,
+requests totalling around 0.9 KB. If you see the full row matrix downloading per query,
 range requests are being rejected somewhere in front of your files.
 {% end %}

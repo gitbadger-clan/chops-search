@@ -46,12 +46,19 @@ nothing: `input.dispatchEvent(new Event('input'))`.
 | `Enter` | Open the selected result |
 | `Esc` or `Ctrl-[` | Clear the query; close if already empty |
 
-## Status line
+## Results and status line
 
-`#chops-mode` reports the states a user needs to know about: keyword-only
-mode when semantic rows can't load, and unavailability when the engine can't
-boot. See [Designed degradation](/explanations/designed-degradation/) for
-when each occurs.
+Each result renders as its document title with a snippet underneath: the
+text of the chunk that earned the document its rank, fetched after ranking
+and streamed in as it arrives, with the query's matched words highlighted.
+The results list carries `data-mode="hybrid"` or `data-mode="keyword"`,
+which the stylesheet and your own CSS can key off.
+
+`#chops-mode` reports the states a user needs to know about: the result
+count with the mode it was ranked under ("keyword only" when semantic rows
+can't load), and unavailability when the engine can't boot. See
+[Designed degradation](/explanations/designed-degradation/) for when each
+occurs.
 
 ## Theming
 
@@ -65,6 +72,11 @@ put overrides in your own stylesheet rather than editing it.
 
 The page script spawns `search-worker.js`, which loads the wasm engine (from
 `search/pkg/`, version-queried), plans byte ranges per query, and persists
-fetched rows in a Cache API row cache. Queries are debounced, and a
-superseded in-flight query is dropped rather than raced. The
+fetched rows in a Cache API row cache keyed to the build hash. Queries are
+debounced, and a superseded in-flight query is dropped rather than raced.
+Snippet fetches are memoized by chunk id for the session, and the snippet
+offset table is fetched once at boot as a single small range. A host that
+answers a range request with a 200 is remembered as range-hostile for the
+session: the file is ingested whole once, and later queries skip ranges
+rather than re-paying the fallback. The
 [artifact reference](/reference/artifacts/) lists what loads when.

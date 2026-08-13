@@ -24,10 +24,16 @@ from the site.
 
 ## What gets weighted
 
-Tags from `[taxonomies] tags = [...]` are indexed as high-weight terms
-(default 4x), titles at 2x, body text at 1x. Tags carry more signal per byte
-than anything in the body: they're the author's own statement of what a page
-is about.
+Keyword scoring is BM25F over four fields. Tags from
+`[taxonomies] tags = [...]` are the highest-weighted field (default 4): they
+carry more signal per byte than anything in the body, being the author's own
+statement of what a page is about. Titles weight 2, the front-matter
+`description` sits at parity with body (1), and each field is normalised by
+its own length before the weights apply, so a weight biases rather than
+inflates. [How ranking works](/explanations/hybrid-ranking/) has the
+mechanics; the weights are
+[configurable](/reference/configuration/) and baked into the index at build
+time.
 
 ## URL reconstruction
 

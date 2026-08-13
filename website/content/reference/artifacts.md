@@ -16,23 +16,36 @@ runtime.
 | --- | --- | --- |
 | `model.meta.<hash>.bin` | Eager, gzipped | Complete vocab + per-row quantization scales. Never partial: a truncated vocab tokenizes silently wrong |
 | `model.prefix.<hash>.i8` | Eager | Top ~2048 frequency-ordered rows, covering most queries outright |
-| `index.<hash>.bin` | Eager, gzipped | Chunk vectors, document URLs and titles, keyword postings |
+| `index.<hash>.bin` | Eager, gzipped | Chunk vectors, document URLs and titles, keyword postings, plus the BM25F field weights and the scoring calibration (`min_gap`, `rrf_alpha`, `min_cos` override) baked at build time, so the browser scores with what the site configured |
 | `model.rows.<hash>.i8` | Range-fetched per query | Full matrix, headerless raw i8; row *i* at byte *i × dim* |
-| `snippets.<hash>.bin` | Range-fetched after ranking | Per-chunk display text |
+| `snippets.<hash>.bin` | Range-fetched | Offset table fetched once at boot as a single small range; per-chunk display text fetched after ranking |
 | `manifest.json` | Eager, revalidating | Names every hashed file; the only unhashed artifact |
 
-Filenames carry a build hash so everything above `manifest.json` can be
-served immutable. Artifacts are byte-stable given the same content and model:
-sorted walks, sorted postings, deterministic tie-breaks, so an unchanged site
-rebuilds to identical hashes and browser caches stay warm.
+**Gzip siblings.** "Eager, gzipped" means the build writes a `.gz` sibling
+next to the raw file (`index.<hash>.bin.gz`) and the worker fetches it,
+decompressing with `DecompressionStream`. This is deliberate: hosts compress
+a fixed list of content types and `application/octet-stream` isn't on it,
+so relying on host compression would ship the eager payload raw. Compressing
+at build time keeps the saving host-agnostic. Range-served files are never
+compressed, since a byte offset into a gzip stream is meaningless.
+
+**One hash, shared.** Every hashed filename carries the same build hash,
+computed over the whole artifact set. The model rows are frequency-ordered
+against *your* corpus (so the eager prefix covers the queries your content
+attracts), which makes the model artifacts corpus-dependent: a content
+change re-derives the frequency permutation, so all five files legitimately
+travel together under one hash. Artifacts are byte-stable given the same
+content and model: sorted walks, sorted postings, deterministic tie-breaks,
+so an unchanged site rebuilds to identical hashes and browser caches stay
+warm.
 
 ## What changes when
 
-| You changed | Files that get new hashes |
+| You changed | Effect |
 | --- | --- |
-| Site content | `index`, `snippets` |
-| The model or `dims` | `model.meta`, `model.prefix`, `model.rows`, plus `index` and `snippets` (chunk vectors re-embed) |
-| Nothing | Nothing; the build is reproducible |
+| Site content | New build hash; all five artifacts get new names (the row matrix is frequency-permuted against the corpus, so it changes with the content) |
+| The model, `dims`, field weights, or scoring calibration | New build hash, same as above; weights and calibration live in `index.bin` |
+| Nothing | Nothing; the build is reproducible and every cache stays warm |
 
 ## The runtime
 
