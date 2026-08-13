@@ -83,7 +83,7 @@ pub fn explain(artifacts: &Path, query: &str, limit: usize, args: ScoreArgs) -> 
         engine.chunk_count(),
         engine.dim()
     );
-    println!("scoring:   {}", ScoreArgs::describe(&opts));
+    println!("scoring:   {}", args.describe(&opts));
     println!("query:     {query:?}");
 
     // Vocab rebuilt only to SHOW the wordpiece split; the engine

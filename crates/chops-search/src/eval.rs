@@ -127,33 +127,63 @@ impl ScoreArgs {
     }
 
     /// The `scoring:` header. Shared so `eval` and `query` can't report
-    /// different thresholds for the same flags — they diverged once,
-    /// when this existed and `eval` printed its own copy anyway.
+    /// different thresholds for the same flags — they diverged once.
     ///
-    /// Keyword knobs first, then the semantic ones, then fusion, which
-    /// belongs to neither engine. strong_cos prints "off" at infinity
-    /// rather than `inf`: it disables at infinity while every other knob
-    /// disables at zero.
-    pub fn describe(o: &ScoreOpts) -> String {
-        format!(
-            "kw_floor {:.2}, w_title {:.2}, w_tag {:.2}, w_desc {:.2}, \
-             min_cos {:.2}, chunk_penalty {:.3}, min_gap {:.2}, strong_cos {}, \
-             rrf_alpha {:.2}, rrf_k {:.1}",
+    /// Flag-overridden knobs are marked `*`, because a transcript that
+    /// can't distinguish "the index shipped 0.08" from "a flag injected
+    /// 0.08" is the measured-at-0.34 header debt in a new denomination.
+    /// Unmarked provenance is static and stated in the legend: weights,
+    /// min_gap, rrf_alpha, and min_cos ride in index.bin; the rest are
+    /// compiled defaults.
+    pub fn describe(&self, o: &ScoreOpts) -> String {
+        let m = |set: bool| if set { "*" } else { "" };
+        let any_flag = [
+            self.min_cos,
+            self.chunk_penalty,
+            self.kw_floor,
+            self.min_gap,
+            self.strong_cos,
+            self.w_title,
+            self.w_tag,
+            self.w_desc,
+            self.rrf_alpha,
+            self.rrf_k,
+        ]
+        .iter()
+        .any(Option::is_some);
+        let mut s = format!(
+            "kw_floor {:.2}{}, w_title {:.2}{}, w_tag {:.2}{}, w_desc {:.2}{}, \
+             min_cos {:.2}{}, chunk_penalty {:.3}{}, min_gap {:.2}{}, strong_cos {}{}, \
+             rrf_alpha {:.2}{}, rrf_k {:.1}{}",
             o.kw_confidence,
+            m(self.kw_floor.is_some()),
             o.weights.title,
+            m(self.w_title.is_some()),
             o.weights.tag,
+            m(self.w_tag.is_some()),
             o.weights.desc,
+            m(self.w_desc.is_some()),
             o.min_cos,
+            m(self.min_cos.is_some()),
             o.chunk_penalty,
+            m(self.chunk_penalty.is_some()),
             o.min_gap,
+            m(self.min_gap.is_some()),
             if o.strong_cos.is_finite() {
                 format!("{:.2}", o.strong_cos)
             } else {
                 "off".into()
             },
+            m(self.strong_cos.is_some()),
             o.rrf_alpha,
-            o.rrf_k
-        )
+            m(self.rrf_alpha.is_some()),
+            o.rrf_k,
+            m(self.rrf_k.is_some()),
+        );
+        if any_flag {
+            s.push_str("  (* = flag override)");
+        }
+        s
     }
 }
 
@@ -188,7 +218,7 @@ pub fn eval(
     // --chunk-penalty.
     let opts = args.apply(engine.score_opts());
     engine.set_score_opts(opts);
-    println!("scoring:   {}", ScoreArgs::describe(&opts));
+    println!("scoring:   {}", args.describe(&opts));
     engine
         .ingest(0, &prefix_bytes)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -426,8 +456,10 @@ fn sweep(
     print_summary(&p);
     print_failures(&p);
     println!(
-        "\nlock it in: chops-search eval --rrf-k {k} --rrf-alpha {a} \
-         (plus whatever base flags this sweep ran with)"
+        "\nlock in alpha: set `rrf_alpha = {a}` in chops-search.toml and rebuild — \
+         the value then reaches the browser, CI, and a bare eval alike.\n\
+         rrf_k has no config key: if {k} ≠ 60 keeps winning sweeps, that is a \
+         format-version conversation, not a flag to carry around."
     );
     Ok(())
 }
@@ -677,7 +709,7 @@ mod tests {
     #[test]
     fn rrf_k_overrides_alone() {
         // The other half of the fusion pair. Same orthogonality claim:
-        // sweeping the curve's shape must not touch either engine, and
+
         // it must not drag rrf_alpha along.
         let o = ScoreArgs {
             rrf_k: Some(5.0),
@@ -699,7 +731,7 @@ mod tests {
 
     #[test]
     fn describe_reports_every_knob() {
-        let s = ScoreArgs::describe(&base());
+        let s = ScoreArgs::default().describe(&base());
         for knob in [
             "kw_floor",
             "w_title",
@@ -722,8 +754,29 @@ mod tests {
             strong_cos: f32::INFINITY,
             ..base()
         };
-        let s = ScoreArgs::describe(&opts);
+        let s = ScoreArgs::default().describe(&opts);
         assert!(s.contains("strong_cos off"), "{s}");
         assert!(!s.contains("inf"), "{s}");
+    }
+
+    #[test]
+    fn describe_marks_flag_overrides_and_only_those() {
+        // Provenance in the transcript: a sweep log must distinguish
+        // "the index shipped 0.08" from "a flag injected 0.08" — the
+        // measured-at-0.34 header debt in a new denomination.
+        let flagged = ScoreArgs {
+            min_gap: Some(0.11),
+            ..Default::default()
+        };
+        let s = flagged.describe(&base());
+        assert!(s.contains("min_gap 0.11*"), "{s}");
+        assert!(
+            !s.contains("rrf_alpha 0.75*"),
+            "sibling must be unmarked: {s}"
+        );
+        assert!(s.contains("(* = flag override)"), "{s}");
+
+        let clean = ScoreArgs::default().describe(&base());
+        assert!(!clean.contains('*'), "no flags, no markers: {clean}");
     }
 }
