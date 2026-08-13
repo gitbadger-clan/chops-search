@@ -24,16 +24,13 @@ const CONFIG: &str = r#"# chops-search — https://github.com/gitbadger-clan/cho
 #
 # Paths resolve relative to THIS file, so `chops-search build` works from
 # anywhere inside the site.
-
 content = "content"
 out     = "static/search"
 model   = ".chops-search/model"
-
 # PCA target. The model's native size is 256; 128 halves the eager prefix
 # and every per-query range fetch. Re-run `chops-search eval` after
 # changing it — dimensionality reduction is real information loss.
 dims = 128
-
 # BM25F field weights: what a length-normalised occurrence in each field
 # is worth against one in the body. Each field's term frequency is divided
 # by that field's OWN average length before these apply, and saturation
@@ -52,9 +49,43 @@ dims = 128
 # title_weight = 2
 # tag_weight   = 4
 # desc_weight  = 1
-
 # chunk_chars = 600
 # prefix_rows = 2048
+
+# Scoring calibration. Unlike the weights above, these three are baked
+# into index.bin at build time and read by the engine at construction,
+# so the value committed here is the value every visitor's browser runs
+# — and a bare `chops-search eval` measures the same configuration.
+#
+# They ship commented out because they are CALIBRATED, not chosen: a
+# value that helps one corpus hurts another, and uncommenting an example
+# without measuring is shipping someone else's calibration. The loop is:
+# sweep with `chops-search eval` against a labeled fixture set, verify
+# the mechanism with `chops-search query --explain`, then pin the
+# winning value here and rebuild.
+#
+# min_gap: the corroboration gate. When a query has no keyword evidence
+# and no document stands out from the pack by at least this much (best
+# cosine minus corpus median), the semantic ranking is suppressed rather
+# than served — the flat-field signature is noise on a single-topic
+# corpus. 0 disarms the gate, which is the compiled default.
+# Sweep: chops-search eval --min-gap
+# min_gap = 0.08
+#
+# rrf_alpha: confidence-weighted fusion. The keyword list's RRF vote
+# scales by 1 + rrf_alpha × the fraction of the query's idf mass it
+# matched, so an exact rare-term hit can outvote a merely-adjacent
+# semantic first place, while stopword-heavy queries fuse as plain RRF.
+# 0 is plain RRF, the compiled default.
+# Sweep: chops-search eval --rrf-alpha
+# rrf_alpha = 1.0
+#
+# min_cos: the semantic relevance floor, as an OVERRIDE. Leave this
+# commented and the engine derives the floor from `dims`, which is right
+# for almost every corpus and tracks dims changes automatically. Pin it
+# only if a sweep said so — a value calibrated at one dims is wrong at
+# another — and note 0 is itself an override, meaning "floor off".
+# min_cos = 0.34
 "#;
 
 const SEARCH_PAGE: &str = r#"+++
@@ -210,14 +241,77 @@ fn write_new(
 
 #[cfg(test)]
 mod tests {
+    use super::CONFIG;
     use super::*;
+    use crate::config::Config;
+    use std::path::PathBuf;
 
     fn tmp(name: &str) -> std::path::PathBuf {
         let p = std::env::temp_dir().join(format!("chops-init-{name}-{}", std::process::id()));
         fs::create_dir_all(p.join("content")).unwrap();
         p
     }
+    fn root() -> PathBuf {
+        PathBuf::from("/site")
+    }
 
+    /// Strip the comment marker from lines shaped like `# key = value`,
+    /// leaving prose comments alone. This is what a user's editor does
+    /// when they adopt an example, so the test exercises exactly the
+    /// text they will end up with.
+    fn uncommented(template: &str) -> String {
+        template
+            .lines()
+            .map(|l| {
+                let Some(rest) = l.strip_prefix("# ") else {
+                    return l.to_string();
+                };
+                let key_len = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_lowercase() || *c == '_')
+                    .count();
+                if key_len > 0 && rest[key_len..].trim_start().starts_with('=') {
+                    rest.to_string()
+                } else {
+                    l.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn scaffold_parses_and_ships_inert_scoring() {
+        // Two claims at once. Parsing at all proves every live key is in
+        // KNOWN_KEYS — the unknown-key check turns template drift into a
+        // test failure. The field asserts prove the scaffold ships the
+        // inert configuration: examples in comments, no values smuggled.
+        let cfg = Config::parse(CONFIG, root()).expect("scaffold must parse");
+        assert_eq!(cfg.min_gap, 0.0, "scaffold must not arm the gate");
+        assert_eq!(cfg.rrf_alpha, 0.0, "scaffold must fuse as plain RRF");
+        assert_eq!(cfg.min_cos, None, "scaffold must derive the floor");
+        // The one deliberate live value: dims is scaffolded explicit so
+        // the size-vs-recall decision is visible in the diff, against a
+        // compiled default of native size.
+        assert_eq!(cfg.dims, Some(128));
+    }
+
+    #[test]
+    fn scaffold_examples_are_valid_when_uncommented() {
+        // Every `# key = value` example is text a user will uncomment
+        // verbatim, so each must be a known key with an in-range value.
+        // A future rename or rail change that orphans an example fails
+        // here instead of in some user's build.
+        let live = uncommented(CONFIG);
+        let cfg = Config::parse(&live, root()).expect("uncommented scaffold must parse");
+        // And the uncommenting actually reached the parser — guards the
+        // helper against silently matching nothing.
+        assert_eq!(cfg.min_gap, 0.08);
+        assert_eq!(cfg.rrf_alpha, 1.0);
+        assert_eq!(cfg.min_cos, Some(0.34));
+        assert_eq!(cfg.title_weight, 2.0);
+        assert_eq!(cfg.chunk_chars, 600);
+    }
     #[test]
     fn creates_config_and_page() {
         let root = tmp("create");
