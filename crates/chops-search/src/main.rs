@@ -30,7 +30,7 @@ use sha2::{Digest, Sha256};
 
 use chops_search::assets;
 use chops_search::completion;
-use chops_search::config::Config;
+use chops_search::config::{Config, ScoringFlags};
 use chops_search::frontmatter::{self, FrontMatter};
 use chops_search::model_loader::load_model2vec;
 use chops_search::pca::pca_reduce;
@@ -168,7 +168,11 @@ change when the model does, and the wasm caches across every deploy.
 The BM25F field weights from chops-search.toml are written into \
 index.bin, so the browser scores with what the site configured. Sweep \
 them with `eval --w-title` / `--w-tag` against a built index; only the \
-committed value needs a rebuild.")]
+committed value needs a rebuild. 
+
+The scoring calibration (`min_gap`, `rrf_alpha`, `min_cos`) from \
+chops-search.toml is baked in the same way; the build log's `scoring:` \
+line states what shipped.")]
     Build {
         /// Content directory. Default: `content` from chops-search.toml.
         #[arg(long, value_name = "DIR")]
@@ -190,8 +194,8 @@ committed value needs a rebuild.")]
         /// Smaller chunks sharpen rare-word signal and cost more vectors.
         #[arg(long, value_name = "N")]
         chunk_chars: Option<usize>,
-        /// PCA target dimensionality. Default 128; native size is 256.
-        ///
+        /// PCA target dimensionality. Default: `dims` from
+        /// chops-search.toml, or the model's native size when unset.
         /// Halves the eager prefix and every range fetch, at some cost in
         /// recall. Re-run `eval` after changing it.
         #[arg(long, value_name = "N")]
@@ -202,6 +206,26 @@ committed value needs a rebuild.")]
         /// frontend.
         #[arg(long)]
         no_runtime: bool,
+        /// Corroboration gate threshold to bake into index.bin.
+        ///
+        /// Overrides `min_gap` from chops-search.toml; compiled default
+        /// 0 (gate disarmed). Calibrate with `eval --min-gap` first —
+        /// this flag ships the value, it doesn't sweep it.
+        #[arg(long, value_name = "GAP")]
+        min_gap: Option<f32>,
+        /// Fusion weighting to bake into index.bin.
+        ///
+        /// Overrides `rrf_alpha` from chops-search.toml; compiled
+        /// default 0 (plain RRF).
+        #[arg(long, value_name = "ALPHA")]
+        rrf_alpha: Option<f32>,
+        /// Relevance-floor override to bake into index.bin.
+        ///
+        /// Overrides `min_cos` from chops-search.toml. When neither is
+        /// set the engine derives the floor from dimensionality, which
+        /// is right for almost every corpus; 0 disables the floor.
+        #[arg(long, value_name = "COS")]
+        min_cos: Option<f32>,
     },
 
     /// List indexed documents and their URLs.
@@ -266,7 +290,8 @@ turned up in.")]
         #[arg(long, value_name = "WEIGHT")]
         w_desc: Option<f32>,
         /// Minimum top-median cosine contrast for an uncorroborated
-        /// semantic list. Default 0 (disabled).
+        /// semantic list. Default: whatever index.bin was built with
+        /// (0 on an uncalibrated corpus, i.e. disabled).
         ///
         /// The corroboration gate: when the keyword side contributed
         /// nothing and no document stands out from the corpus, the
@@ -281,7 +306,8 @@ turned up in.")]
         #[arg(long, value_name = "COS")]
         strong_cos: Option<f32>,
         /// How much a confident keyword list outvotes the semantic one
-        /// in fusion. Default: whatever the engine ships (0, plain RRF).
+        /// in fusion. Default: whatever index.bin was built with (0, plain
+        /// RRF, on an uncalibrated corpus).
         ///
         /// For diagnosing a result that both engines ranked differently:
         /// the keyword list fuses at 1 + alpha × confidence. At the
@@ -335,7 +361,9 @@ and the best cell is re-run for its per-kind breakdown and failures.")]
         /// small set does not fail the build. Ignored in sweep mode.
         #[arg(long, value_name = "FRACTION", default_value_t = 0.0)]
         fail_under: f32,
-        /// Minimum best-chunk cosine for semantic relevance. Default 0.20.
+        /// Minimum best-chunk cosine for semantic relevance. Default:
+        /// the index.bin override, or derived from dimensionality when
+        /// none was baked.
         ///
         /// For sweeping the relevance floor. Below it a document counts
         /// as unrelated, which is what makes empty results possible.
@@ -380,7 +408,8 @@ and the best cell is re-run for its per-kind breakdown and failures.")]
         #[arg(long, value_name = "COEFF")]
         chunk_penalty: Option<f32>,
         /// Minimum top-median cosine contrast for an uncorroborated
-        /// semantic list. Default 0 (disabled).
+        /// semantic list. Default: whatever index.bin was built with
+        /// (0 on an uncalibrated corpus, i.e. disabled).
         ///
         /// The corroboration gate: when the keyword side contributed
         /// nothing and no document stands out from the corpus, the
@@ -476,15 +505,17 @@ fn main() -> Result<()> {
             chunk_chars,
             dims,
             no_runtime,
+            min_gap,
+            rrf_alpha,
+            min_cos,
         } => {
-            let cfg = load_config(&site)?.with_overrides(
-                content,
-                out,
-                model,
-                dims,
-                chunk_chars,
-                prefix_rows,
-            );
+            let cfg = load_config(&site)?
+                .with_overrides(content, out, model, dims, chunk_chars, prefix_rows)
+                .with_scoring(ScoringFlags {
+                    min_gap,
+                    rrf_alpha,
+                    min_cos,
+                })?;
             eprintln!(
                 "config: content {}, out {}",
                 cfg.content.display(),
@@ -857,6 +888,18 @@ fn build(cfg: &Config, runtime: bool) -> Result<()> {
         cfg.tag_weight,
         cfg.desc_weight
     );
+    // The shipped scoring, stated in the build log so a deploy's output
+    // records what visitors will actually run — the honesty gap this
+    // batch closes was, at bottom, this line not existing.
+    eprintln!(
+        "scoring: min_gap {:.2}, rrf_alpha {:.2}, min_cos {}",
+        cfg.min_gap,
+        cfg.rrf_alpha,
+        match cfg.min_cos {
+            Some(v) => format!("{v:.2} (override)"),
+            None => "derived from dims".to_string(),
+        }
+    );
 
     // ---- 7. Serialize --------------------------------------------------
     // Clamped: a config asking for more prefix rows than the model has
@@ -878,6 +921,13 @@ fn build(cfg: &Config, runtime: bool) -> Result<()> {
             tag: cfg.tag_weight,
             desc: cfg.desc_weight,
         },
+        // Same provenance as the weights: calibrated against this corpus,
+        // so they travel with it. min_cos is an OVERRIDE — None derives
+        // the floor from dimensionality at engine construction, and an
+        // explicit 0.0 is the different, meaningful claim "floor off".
+        min_gap: cfg.min_gap,
+        rrf_alpha: cfg.rrf_alpha,
+        min_cos: cfg.min_cos,
         docs,
         chunk_doc,
         chunk_vecs,

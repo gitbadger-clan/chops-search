@@ -1,231 +1,263 @@
-//! `chops-search.toml` — per-site configuration.
+//! chops-search.toml discovery and parsing.
 //!
-//! Once this is a tool other people install rather than a subdirectory of
-//! one site, passing `--content ../content --model model --out
-//! ../static/search` on every invocation stops being reasonable: the
-//! paths are properties of the site, not of the command. They belong in a
-//! file that lives beside the site and shows up in a diff when someone
-//! changes them.
+//! Discovered by walking up from the working directory the way cargo
+//! finds Cargo.toml, so the CLI works from anywhere inside the site.
+//! Every key is optional: an empty file (or no file) is a valid
+//! configuration and means the compiled defaults. Paths are resolved
+//! relative to the config file's directory, never the working directory,
+//! so `chops-search build` behaves identically from the repo root and
+//! from three directories down.
 //!
-//! Discovery walks up from the working directory the way cargo finds
-//! Cargo.toml, so `chops-search build` works from anywhere inside the
-//! site. Paths inside the file resolve relative to the FILE, not the
-//! working directory — otherwise the same config would mean different
-//! things depending on where you ran it from.
+//! Unknown keys are an error, not a shrug. A misspelled `chunk_size`
+//! that silently does nothing is worse than a failed build — and after
+//! v5 the stakes are higher: a typo'd `min_gp = 0.08` would silently
+//! ship the gate disarmed, which is the exact honesty gap the scoring
+//! keys exist to close.
 //!
-//! Precedence is flags > file > defaults. Flags win because that's what
-//! makes one-off experiments (`--dims 128`, a scratch `--out`) possible
-//! without editing tracked config.
+//! Hand-navigated TOML rather than serde-derived, same reasoning as the
+//! fixture loader: the schema is a dozen keys, the error messages can
+//! name the exact key and expectation, and serde stays out of the
+//! dependency tree.
 //!
-//! Example, at the site root next to config.toml:
+//! SCORING CALIBRATION (`min_gap`, `rrf_alpha`, `min_cos`). These are
+//! per-corpus calibrated values, and they follow the field weights'
+//! provenance rule: a value calibrated against a corpus travels with the
+//! corpus. `build` writes them into index.bin, the engine reads them at
+//! construction, and the browser, a bare `eval`, and CI all score the
+//! same configuration from the same bytes. The eval/query flags still
+//! override per run for sweeping — the config states what ships, the
+//! flags state deviations from it.
 //!
-//! ```toml
-//! content = "content"
-//! out     = "static/search"
-//! model   = ".chops-search/model"
-//!
-//! dims        = 128     # PCA target; omit for the model's native size
-//! chunk_chars = 600
-//! prefix_rows = 2048
-//!
-//! title_weight = 2      # BM25F: a title occurrence against a body one
-//! tag_weight   = 4      # tags are the author's own relevance signal
-//! desc_weight  = 1      # front-matter description, at body parity
-//! ```
+//! `min_cos` is an OVERRIDE, not a default: absent means the engine
+//! derives the floor from dimensionality (min_cos_for), and an explicit
+//! 0.0 is the different, meaningful claim "floor off". The distinction
+//! survives the wire — see format.rs. The other two write
+//! unconditionally: their compiled defaults (0.0, both inert) are
+//! legitimate shipped values, so absent and zero coinciding is harmless.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
+use chops_search_core::keyword::FieldWeights;
+use chops_search_core::keyword::{W_DESC, W_TAG, W_TITLE};
 
-pub const FILE_NAME: &str = "chops-search.toml";
+/// Compiled path/shape defaults. Scoring defaults come from
+/// chops-search-core so this file cannot drift from the engine.
+const DEFAULT_CONTENT: &str = "content";
+const DEFAULT_OUT: &str = "static/search";
+const DEFAULT_MODEL: &str = ".chops-search/model";
+const DEFAULT_PREFIX_ROWS: u32 = 2048;
+const DEFAULT_CHUNK_CHARS: usize = 600;
+
+/// Every key `parse` understands, checked before anything else so a
+/// typo'd key fails even when the value happens to be well-formed.
+const KNOWN_KEYS: &[&str] = &[
+    "content",
+    "out",
+    "model",
+    "dims",
+    "chunk_chars",
+    "prefix_rows",
+    "title_weight",
+    "tag_weight",
+    "desc_weight",
+    "min_gap",
+    "rrf_alpha",
+    "min_cos",
+];
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// Directory the config was found in; every relative path resolves
-    /// against this.
+    /// Directory containing chops-search.toml (or the discovery start
+    /// when no file exists). Relative paths resolve against this, and
+    /// eval finds fixtures/ under it.
     pub root: PathBuf,
     pub content: PathBuf,
     pub out: PathBuf,
     pub model: PathBuf,
+    /// PCA target dimensionality. None means the model's native size.
     pub dims: Option<usize>,
     pub chunk_chars: usize,
     pub prefix_rows: u32,
-    /// BM25F field weights, baked into index.bin so the browser scores
-    /// with what the site configured.
-    ///
-    /// These are NOT the pre-multiplied term-frequency multipliers they
-    /// replaced. The old scheme counted a title mention as N body
-    /// mentions before saturation, which let a weighted title tf run
-    /// straight past k1. BM25F normalizes each field by its own length,
-    /// combines the normalized tfs under these weights, and saturates
-    /// once — so a weight biases without inflating, and the useful range
-    /// is small. 0.0 is legal and means "ignore this field".
-    ///
-    /// `desc_weight` defaults to 1.0, at parity with body, because
-    /// descriptions were previously counted as body terms and the field
-    /// was introduced to fix dl_body pollution rather than to change
-    /// ranking. Sweep it before raising it: measured on the docs corpus,
-    /// description evidence is not weight-sensitive.
+    /// BM25F field weights, baked into index.bin at build time.
     pub title_weight: f32,
     pub tag_weight: f32,
     pub desc_weight: f32,
+    /// Corroboration gate threshold, baked into index.bin. 0.0 (the
+    /// default) ships the gate disarmed. Calibrate against the corpus
+    /// with `chops-search eval --min-gap` before setting it.
+    pub min_gap: f32,
+    /// Confidence-weighted fusion coefficient, baked into index.bin.
+    /// 0.0 (the default) is plain RRF. Same calibration discipline.
+    pub rrf_alpha: f32,
+    /// Relevance-floor override, baked into index.bin. None derives the
+    /// floor from dimensionality at engine construction, which is the
+    /// right answer for almost every corpus — an explicit value pins
+    /// the floor across dims changes, and an explicit 0.0 disables it.
+    pub min_cos: Option<f32>,
 }
 
 impl Config {
-    /// Defaults matching a stock Zola layout, rooted at `root`.
-    pub fn defaults_at(root: PathBuf) -> Self {
+    fn defaults(root: PathBuf) -> Self {
         Config {
-            content: root.join("content"),
-            out: root.join("static/search"),
-            model: root.join(".chops-search/model"),
-            root,
+            content: root.join(DEFAULT_CONTENT),
+            out: root.join(DEFAULT_OUT),
+            model: root.join(DEFAULT_MODEL),
+            // None = the model's native size. Sites that reduce (both
+            // current deploys run dims = 128) say so in their config,
+            // where the choice is diffable — a compiled 128 here would
+            // make "native" unspellable and turn a per-site calibration
+            // into a silent product default.
             dims: None,
-            chunk_chars: 600,
-            prefix_rows: 2048,
-            title_weight: chops_search_core::keyword::W_TITLE,
-            tag_weight: chops_search_core::keyword::W_TAG,
-            desc_weight: chops_search_core::keyword::W_DESC,
+            chunk_chars: DEFAULT_CHUNK_CHARS,
+            prefix_rows: DEFAULT_PREFIX_ROWS,
+            title_weight: W_TITLE,
+            tag_weight: W_TAG,
+            desc_weight: W_DESC,
+            min_gap: 0.0,
+            rrf_alpha: 0.0,
+            min_cos: None,
+            root,
         }
     }
 
-    /// Find and load config, walking up from `start`. Returns defaults
-    /// rooted at `start` when no file exists — a site with a stock layout
-    /// needs no config at all.
+    /// Walk up from `start` looking for chops-search.toml; parse it when
+    /// found, defaults rooted at `start` when not. A present-but-broken
+    /// file is an error, never a silent fall-through to defaults — a
+    /// typo'd key must not quietly rebuild with different weights.
     pub fn discover(start: &Path) -> Result<Self> {
-        let start = start.canonicalize().unwrap_or_else(|_| start.to_path_buf());
-        let mut dir = start.as_path();
+        let start = start
+            .canonicalize()
+            .with_context(|| format!("resolving {}", start.display()))?;
+        let mut dir: &Path = &start;
         loop {
-            let candidate = dir.join(FILE_NAME);
+            let candidate = dir.join("chops-search.toml");
             if candidate.is_file() {
-                return Self::load(&candidate);
+                let text = fs::read_to_string(&candidate)
+                    .with_context(|| format!("reading {}", candidate.display()))?;
+                return Self::parse(&text, dir.to_path_buf())
+                    .with_context(|| format!("in {}", candidate.display()));
             }
             match dir.parent() {
                 Some(p) => dir = p,
-                None => return Ok(Self::defaults_at(start)),
+                None => return Ok(Self::defaults(start)),
             }
         }
     }
 
-    pub fn load(path: &Path) -> Result<Self> {
-        let root = path
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("."));
-        let text =
-            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        let t: toml::Table = text
+    /// Parse config text against defaults rooted at `root`. Public for
+    /// tests; discover() is the entry point.
+    pub fn parse(text: &str, root: PathBuf) -> Result<Self> {
+        let doc: toml::Table = text
             .parse()
-            .with_context(|| format!("{} is not valid TOML", path.display()))?;
+            .context("chops-search.toml is not valid TOML")?;
 
-        let mut cfg = Config::defaults_at(root.clone());
-        let path_of = |key: &str| t.get(key).and_then(|v| v.as_str()).map(|s| root.join(s));
-        if let Some(p) = path_of("content") {
-            cfg.content = p;
-        }
-        if let Some(p) = path_of("out") {
-            cfg.out = p;
-        }
-        if let Some(p) = path_of("model") {
-            cfg.model = p;
+        // Reject unknown keys before reading any known one, so the error
+        // for a half-right file names the typo rather than a downstream
+        // symptom.
+        for key in doc.keys() {
+            if !KNOWN_KEYS.contains(&key.as_str()) {
+                bail!("unknown key `{key}` (known: {})", KNOWN_KEYS.join(", "));
+            }
         }
 
-        // Integers are read through i64 and range-checked rather than
-        // cast: a typo like prefix_rows = -1 should be an error at parse
-        // time, not a panic or a wrapped value deep in the build.
-        let int = |key: &str| -> Result<Option<i64>> {
-            match t.get(key) {
-                None => Ok(None),
-                Some(v) => v
-                    .as_integer()
-                    .map(Some)
-                    .with_context(|| format!("{key} must be an integer")),
-            }
-        };
-        // Field weights are f32 but must still accept `title_weight = 2`:
-        // TOML types that as an integer, and every config written before
-        // BM25F landed (including the one `chops-search init` scaffolds)
-        // spells them without a decimal point. Rejecting integers here
-        // would break those sites on upgrade for no reason.
-        let num = |key: &str| -> Result<Option<f64>> {
-            match t.get(key) {
-                None => Ok(None),
-                Some(v) => v
-                    .as_float()
-                    .or_else(|| v.as_integer().map(|i| i as f64))
-                    .map(Some)
-                    .with_context(|| format!("{key} must be a number")),
-            }
-        };
-        if let Some(v) = int("dims")? {
-            if v <= 0 {
-                anyhow::bail!("dims must be positive");
-            }
-            cfg.dims = Some(v as usize);
+        let mut cfg = Self::defaults(root);
+
+        if let Some(v) = doc.get("content") {
+            cfg.content = cfg.root.join(as_str(v, "content")?);
         }
-        if let Some(v) = int("chunk_chars")? {
-            if v < 100 {
-                anyhow::bail!("chunk_chars below 100 defeats chunking");
+        if let Some(v) = doc.get("out") {
+            cfg.out = cfg.root.join(as_str(v, "out")?);
+        }
+        if let Some(v) = doc.get("model") {
+            cfg.model = cfg.root.join(as_str(v, "model")?);
+        }
+        if let Some(v) = doc.get("dims") {
+            let d = as_usize(v, "dims")?;
+            if d == 0 {
+                bail!("dims must be positive");
             }
-            cfg.chunk_chars = v as usize;
+            cfg.dims = Some(d);
         }
-        if let Some(v) = int("prefix_rows")? {
-            if !(0..=u32::MAX as i64).contains(&v) {
-                anyhow::bail!("prefix_rows out of range");
+        if let Some(v) = doc.get("chunk_chars") {
+            let c = as_usize(v, "chunk_chars")?;
+            // Chunking exists to keep the embedding mean sharp; a chunk
+            // this small carries no context and a typo'd 60-for-600
+            // should fail here, not surface as mysterious recall loss.
+            if c < 100 {
+                bail!("chunk_chars below 100 defeats chunking, got {c}");
             }
-            cfg.prefix_rows = v as u32;
+            cfg.chunk_chars = c;
         }
-        // 0.0 is meaningful ("ignore titles"), so the floor is zero, not
-        // one. The ceiling is a sanity rail: past ~100 the combined tf
-        // saturates on the field alone and the other fields stop
-        // mattering, which is a config mistake rather than a strategy.
-        let weight = |key: &str, v: f64| -> Result<f32> {
-            if !v.is_finite() || !(0.0..=100.0).contains(&v) {
-                anyhow::bail!("{key} must be between 0 and 100");
-            }
-            Ok(v as f32)
-        };
-        if let Some(v) = num("title_weight")? {
-            cfg.title_weight = weight("title_weight", v)?;
-        }
-        if let Some(v) = num("tag_weight")? {
-            cfg.tag_weight = weight("tag_weight", v)?;
-        }
-        if let Some(v) = num("desc_weight")? {
-            cfg.desc_weight = weight("desc_weight", v)?;
+        if let Some(v) = doc.get("prefix_rows") {
+            cfg.prefix_rows =
+                u32::try_from(as_usize(v, "prefix_rows")?).context("prefix_rows exceeds u32")?;
         }
 
-        // Unknown keys are an error, not a shrug: a misspelled `chunk_size`
-        // that silently does nothing is worse than a failed build.
-        const KNOWN: &[&str] = &[
-            "content",
-            "out",
-            "model",
-            "dims",
-            "chunk_chars",
-            "prefix_rows",
-            "title_weight",
-            "tag_weight",
-            "desc_weight",
-        ];
-        for key in t.keys() {
-            if !KNOWN.contains(&key.as_str()) {
-                anyhow::bail!(
-                    "unknown key `{key}` in {} (known: {})",
-                    path.display(),
-                    KNOWN.join(", ")
-                );
-            }
+        if let Some(v) = doc.get("title_weight") {
+            cfg.title_weight = as_f32(v, "title_weight")?;
         }
+        if let Some(v) = doc.get("tag_weight") {
+            cfg.tag_weight = as_f32(v, "tag_weight")?;
+        }
+        if let Some(v) = doc.get("desc_weight") {
+            cfg.desc_weight = as_f32(v, "desc_weight")?;
+        }
+        let weights = FieldWeights {
+            title: cfg.title_weight,
+            tag: cfg.tag_weight,
+            desc: cfg.desc_weight,
+        };
+        if !weights.is_sane() {
+            bail!(
+                "field weights out of range (finite, 0..=100): title {}, tag {}, desc {}",
+                cfg.title_weight,
+                cfg.tag_weight,
+                cfg.desc_weight
+            );
+        }
+
+        // Scoring calibration. Ranges are rails, not taste: min_gap and
+        // min_cos are cosine-space quantities, so anything outside 0..=1
+        // is a unit error; rrf_alpha shares the weights' sanity ceiling.
+        // The checks live in helpers because the build FLAGS must reject
+        // exactly what the file keys reject — two validators drift.
+        if let Some(v) = doc.get("min_gap") {
+            cfg.min_gap = check_cosine("min_gap", as_f32(v, "min_gap")?)?;
+        }
+        if let Some(v) = doc.get("rrf_alpha") {
+            cfg.rrf_alpha = check_alpha(as_f32(v, "rrf_alpha")?)?;
+        }
+        if let Some(v) = doc.get("min_cos") {
+            // 0.0 is a real override ("floor off"), which is exactly why
+            // this field is Option and why absence must stay None.
+            cfg.min_cos = Some(check_cosine("min_cos", as_f32(v, "min_cos")?)?);
+        }
+
         Ok(cfg)
     }
 
-    /// Apply CLI overrides. Flags win so one-off experiments don't need a
-    /// config edit.
-    ///
-    /// The field weights are deliberately absent: they're a query-time
-    /// knob, swept with `eval --w-title` / `--w-tag` / `--w-desc` against
-    /// an index that's already built. Only the value baked into
-    /// index.bin — what the browser will use — comes from here.
+    /// Parse a specific config file. `discover` is the CLI entry point;
+    /// this is for callers that already know the path — init uses it to
+    /// verify that the file it just scaffolded actually parses. Paths
+    /// resolve against the file's own directory, same as discover.
+    pub fn load(path: &Path) -> Result<Self> {
+        let text =
+            fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let root = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        Self::parse(&text, root).with_context(|| format!("in {}", path.display()))
+    }
+
+    /// Build-shape overrides: flags win over the file so one-off
+    /// experiments (`--dims 128`, a scratch `--out`) don't need an edit
+    /// to tracked config. Shape only — the scoring calibration has its
+    /// own layer in `with_scoring`, with rails, because unlike these a
+    /// scoring flag can bake a value the browser will run forever.
     pub fn with_overrides(
         mut self,
         content: Option<PathBuf>,
@@ -244,16 +276,84 @@ impl Config {
         if let Some(p) = model {
             self.model = p;
         }
-        if let Some(v) = dims {
-            self.dims = Some(v);
+        if let Some(d) = dims {
+            self.dims = Some(d);
         }
-        if let Some(v) = chunk_chars {
-            self.chunk_chars = v;
+        if let Some(c) = chunk_chars {
+            self.chunk_chars = c;
         }
-        if let Some(v) = prefix_rows {
-            self.prefix_rows = v;
+        if let Some(r) = prefix_rows {
+            self.prefix_rows = r;
         }
         self
+    }
+
+    /// Build-flag layer for the scoring calibration, highest precedence:
+    /// flag > chops-search.toml key > compiled default. Validated
+    /// through the same rails as the file keys, so a flag cannot bake a
+    /// value the config parser would have rejected.
+    pub fn with_scoring(mut self, flags: ScoringFlags) -> Result<Self> {
+        if let Some(g) = flags.min_gap {
+            self.min_gap = check_cosine("--min-gap", g)?;
+        }
+        if let Some(a) = flags.rrf_alpha {
+            self.rrf_alpha = check_alpha(a)?;
+        }
+        if let Some(c) = flags.min_cos {
+            // A flag of 0.0 is the explicit "floor off" override, same
+            // as the file key; there is no flag spelling for "un-set an
+            // override the file made" because nothing needs it — omit
+            // both and the floor derives.
+            self.min_cos = Some(check_cosine("--min-cos", c)?);
+        }
+        Ok(self)
+    }
+}
+
+/// The three scoring flags as named fields rather than three positional
+/// `Option<f32>`s — the same transposition argument as ScoreArgs and
+/// FieldWeights: consecutive same-typed parameters compile transposed
+/// and surface only as "ranking got quietly worse".
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ScoringFlags {
+    pub min_gap: Option<f32>,
+    pub rrf_alpha: Option<f32>,
+    pub min_cos: Option<f32>,
+}
+
+/// Range rails shared by the file keys and the build flags. `key` is
+/// only for the error message.
+fn check_cosine(key: &str, v: f32) -> Result<f32> {
+    if !v.is_finite() || !(0.0..=1.0).contains(&v) {
+        bail!("{key} must be a cosine-space value in 0..=1, got {v}");
+    }
+    Ok(v)
+}
+
+fn check_alpha(v: f32) -> Result<f32> {
+    if !v.is_finite() || !(0.0..=100.0).contains(&v) {
+        bail!("rrf_alpha must be finite and in 0..=100, got {v}");
+    }
+    Ok(v)
+}
+
+fn as_str<'a>(v: &'a toml::Value, key: &str) -> Result<&'a str> {
+    v.as_str()
+        .with_context(|| format!("`{key}` must be a string"))
+}
+
+fn as_usize(v: &toml::Value, key: &str) -> Result<usize> {
+    let n = v
+        .as_integer()
+        .with_context(|| format!("`{key}` must be an integer"))?;
+    usize::try_from(n).with_context(|| format!("`{key}` must be non-negative"))
+}
+
+fn as_f32(v: &toml::Value, key: &str) -> Result<f32> {
+    match v {
+        toml::Value::Float(f) => Ok(*f as f32),
+        toml::Value::Integer(i) => Ok(*i as f32),
+        _ => bail!("`{key}` must be a number"),
     }
 }
 
@@ -261,47 +361,68 @@ impl Config {
 mod tests {
     use super::*;
 
-    fn write(dir: &Path, body: &str) -> PathBuf {
-        let p = dir.join(FILE_NAME);
-        std::fs::write(&p, body).unwrap();
-        p
+    fn root() -> PathBuf {
+        PathBuf::from("/site")
     }
 
     #[test]
-    fn paths_resolve_against_the_config_file() {
-        let tmp = std::env::temp_dir().join(format!("chops-cfg-{}", std::process::id()));
-        std::fs::create_dir_all(&tmp).unwrap();
-        let p = write(&tmp, "content = \"src/pages\"\nout = \"public/s\"\n");
-        let cfg = Config::load(&p).unwrap();
-        assert_eq!(cfg.content, tmp.join("src/pages"));
-        assert_eq!(cfg.out, tmp.join("public/s"));
-        // Untouched keys keep their defaults, also rooted at the file.
-        assert_eq!(cfg.model, tmp.join(".chops-search/model"));
-        std::fs::remove_dir_all(&tmp).ok();
+    fn empty_config_is_the_compiled_defaults() {
+        let cfg = Config::parse("", root()).unwrap();
+        assert_eq!(cfg.content, PathBuf::from("/site/content"));
+        assert_eq!(cfg.out, PathBuf::from("/site/static/search"));
+        assert_eq!(cfg.model, PathBuf::from("/site/.chops-search/model"));
+        assert_eq!(cfg.dims, None, "absent dims must mean the native size");
+        assert_eq!(cfg.prefix_rows, DEFAULT_PREFIX_ROWS);
+        assert_eq!(cfg.title_weight, W_TITLE);
+        // The scoring knobs ship inert unless the corpus calibrated them.
+        assert_eq!(cfg.min_gap, 0.0);
+        assert_eq!(cfg.rrf_alpha, 0.0);
+        assert_eq!(cfg.min_cos, None, "absent min_cos must mean derive");
     }
 
     #[test]
     fn unknown_key_is_an_error() {
-        let tmp = std::env::temp_dir().join(format!("chops-cfg-unk-{}", std::process::id()));
-        std::fs::create_dir_all(&tmp).unwrap();
-        let p = write(&tmp, "chunk_size = 600\n");
-        let err = Config::load(&p).unwrap_err().to_string();
+        let err = Config::parse("chunk_size = 600\n", root())
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("chunk_size"), "{err}");
-        std::fs::remove_dir_all(&tmp).ok();
+        // The motivating case for keeping this check through the v5
+        // batch: a typo'd gate key must fail the build, not silently
+        // ship the gate disarmed.
+        let err = Config::parse("min_gp = 0.08\n", root())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("min_gp"), "{err}");
     }
 
     #[test]
-    fn bad_values_are_rejected() {
-        let tmp = std::env::temp_dir().join(format!("chops-cfg-bad-{}", std::process::id()));
-        std::fs::create_dir_all(&tmp).unwrap();
-        assert!(Config::load(&write(&tmp, "dims = 0\n")).is_err());
-        assert!(Config::load(&write(&tmp, "dims = \"128\"\n")).is_err());
-        assert!(Config::load(&write(&tmp, "chunk_chars = 10\n")).is_err());
-        assert!(Config::load(&write(&tmp, "title_weight = -1\n")).is_err());
-        assert!(Config::load(&write(&tmp, "tag_weight = 1000\n")).is_err());
-        assert!(Config::load(&write(&tmp, "desc_weight = -0.5\n")).is_err());
-        assert!(Config::load(&write(&tmp, "title_weight = \"2\"\n")).is_err());
-        std::fs::remove_dir_all(&tmp).ok();
+    fn calibrated_scoring_keys_parse() {
+        let cfg = Config::parse("min_gap = 0.08\nrrf_alpha = 1.0\n", root()).unwrap();
+        assert_eq!(cfg.min_gap, 0.08);
+        assert_eq!(cfg.rrf_alpha, 1.0);
+        assert_eq!(
+            cfg.min_cos, None,
+            "unrelated keys must not arm the override"
+        );
+    }
+
+    #[test]
+    fn min_cos_zero_is_an_override_not_an_absence() {
+        // Same claim as the ScoreArgs test of the same name: "floor off"
+        // and "derive the floor" are different engines, and the config
+        // layer is the first place the distinction can be lost.
+        let cfg = Config::parse("min_cos = 0.0", root()).unwrap();
+        assert_eq!(cfg.min_cos, Some(0.0));
+        let cfg = Config::parse("min_cos = 0.34", root()).unwrap();
+        assert_eq!(cfg.min_cos, Some(0.34));
+    }
+
+    #[test]
+    fn integer_literals_are_accepted_for_scoring_floats() {
+        // `rrf_alpha = 1` is how a human writes 1.0; rejecting it over
+        // TOML's int/float distinction would be a paper cut.
+        let cfg = Config::parse("rrf_alpha = 1", root()).unwrap();
+        assert_eq!(cfg.rrf_alpha, 1.0);
     }
 
     #[test]
@@ -309,32 +430,116 @@ mod tests {
         // Every config written before BM25F spells these without a
         // decimal point, and TOML types those as integers. Both forms
         // must load, or the change breaks sites on upgrade.
-        let tmp = std::env::temp_dir().join(format!("chops-cfg-w-{}", std::process::id()));
-        std::fs::create_dir_all(&tmp).unwrap();
-        let cfg = Config::load(&write(
-            &tmp,
+        let cfg = Config::parse(
             "title_weight = 2\ntag_weight = 4\ndesc_weight = 1\n",
-        ))
+            root(),
+        )
         .unwrap();
         assert_eq!(cfg.title_weight, 2.0);
         assert_eq!(cfg.tag_weight, 4.0);
         assert_eq!(cfg.desc_weight, 1.0);
-        let cfg = Config::load(&write(
-            &tmp,
-            "title_weight = 1.5\ntag_weight = 0.0\ndesc_weight = 0.25\n",
-        ))
-        .unwrap();
-        assert_eq!(cfg.title_weight, 1.5);
+        let cfg = Config::parse("tag_weight = 0.0\n", root()).unwrap();
         assert_eq!(cfg.tag_weight, 0.0, "zero means ignore the field");
-        assert_eq!(cfg.desc_weight, 0.25);
-        std::fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]
-    fn flags_beat_file() {
-        let tmp = std::env::temp_dir().join(format!("chops-cfg-ovr-{}", std::process::id()));
-        std::fs::create_dir_all(&tmp).unwrap();
-        let cfg = Config::load(&write(&tmp, "dims = 256\n"))
+    fn bad_shape_values_are_rejected() {
+        for bad in [
+            "dims = 0",
+            "dims = \"128\"",
+            "dims = -1",
+            "chunk_chars = 10",
+            "prefix_rows = -1",
+            "title_weight = \"2\"",
+        ] {
+            assert!(
+                Config::parse(bad, root()).is_err(),
+                "{bad:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn out_of_range_scoring_values_fail_loudly() {
+        for bad in [
+            "min_gap = 1.5",
+            "min_gap = -0.1",
+            "min_cos = 2.0",
+            "rrf_alpha = -1",
+        ] {
+            assert!(
+                Config::parse(bad, root()).is_err(),
+                "{bad:?} must be rejected, not clamped or ignored"
+            );
+        }
+    }
+
+    #[test]
+    fn insane_weights_are_rejected() {
+        assert!(Config::parse("tag_weight = -3.0", root()).is_err());
+        assert!(Config::parse("title_weight = 1e7", root()).is_err());
+    }
+
+    #[test]
+    fn each_weight_key_sets_only_its_own_field() {
+        // Three near-identical parse blocks reading three near-identical
+        // key names: a copy-paste that assigns tag_weight twice compiles
+        // and silently ignores one key.
+        let d = Config::parse("", root()).unwrap();
+        let only_title = Config::parse("title_weight = 9\n", root()).unwrap();
+        assert_eq!(
+            (
+                only_title.title_weight,
+                only_title.tag_weight,
+                only_title.desc_weight
+            ),
+            (9.0, d.tag_weight, d.desc_weight)
+        );
+        let only_tag = Config::parse("tag_weight = 9\n", root()).unwrap();
+        assert_eq!(
+            (
+                only_tag.title_weight,
+                only_tag.tag_weight,
+                only_tag.desc_weight
+            ),
+            (d.title_weight, 9.0, d.desc_weight)
+        );
+        let only_desc = Config::parse("desc_weight = 9\n", root()).unwrap();
+        assert_eq!(
+            (
+                only_desc.title_weight,
+                only_desc.tag_weight,
+                only_desc.desc_weight
+            ),
+            (d.title_weight, d.tag_weight, 9.0)
+        );
+    }
+
+    #[test]
+    fn each_scoring_key_sets_only_its_own_field() {
+        // Same copy-paste tripwire for the v5 keys — min_gap and min_cos
+        // even share a validator, so a pasted block assigning the wrong
+        // field would pass every range check.
+        let only_gap = Config::parse("min_gap = 0.9\n", root()).unwrap();
+        assert_eq!(
+            (only_gap.min_gap, only_gap.rrf_alpha, only_gap.min_cos),
+            (0.9, 0.0, None)
+        );
+        let only_alpha = Config::parse("rrf_alpha = 9\n", root()).unwrap();
+        assert_eq!(
+            (only_alpha.min_gap, only_alpha.rrf_alpha, only_alpha.min_cos),
+            (0.0, 9.0, None)
+        );
+        let only_cos = Config::parse("min_cos = 0.9\n", root()).unwrap();
+        assert_eq!(
+            (only_cos.min_gap, only_cos.rrf_alpha, only_cos.min_cos),
+            (0.0, 0.0, Some(0.9))
+        );
+    }
+
+    #[test]
+    fn shape_flags_beat_file() {
+        let cfg = Config::parse("dims = 256\n", root())
             .unwrap()
             .with_overrides(
                 None,
@@ -346,56 +551,63 @@ mod tests {
             );
         assert_eq!(cfg.dims, Some(128));
         assert_eq!(cfg.out, PathBuf::from("/tmp/scratch"));
-        std::fs::remove_dir_all(&tmp).ok();
-    }
-
-    #[test]
-    fn missing_config_yields_stock_zola_defaults() {
-        let cfg = Config::defaults_at(PathBuf::from("/site"));
+        // Untouched values keep the file's / defaults' word.
         assert_eq!(cfg.content, PathBuf::from("/site/content"));
-        assert_eq!(cfg.out, PathBuf::from("/site/static/search"));
-        assert_eq!(cfg.chunk_chars, 600);
-        // Defaults track core's constants rather than restating them.
-        assert_eq!(cfg.title_weight, chops_search_core::keyword::W_TITLE);
-        assert_eq!(cfg.tag_weight, chops_search_core::keyword::W_TAG);
-        assert_eq!(cfg.desc_weight, chops_search_core::keyword::W_DESC);
     }
 
     #[test]
-    fn each_weight_key_sets_only_its_own_field() {
-        // Three near-identical parse blocks reading three near-identical
-        // key names: a copy-paste that assigns tag_weight twice compiles
-        // and silently ignores one key.
-        let tmp = std::env::temp_dir().join(format!("chops-cfg-each-{}", std::process::id()));
-        std::fs::create_dir_all(&tmp).unwrap();
-        let d = Config::defaults_at(tmp.clone());
-        let only_title = Config::load(&write(&tmp, "title_weight = 9\n")).unwrap();
-        assert_eq!(
-            (
-                only_title.title_weight,
-                only_title.tag_weight,
-                only_title.desc_weight
-            ),
-            (9.0, d.tag_weight, d.desc_weight)
-        );
-        let only_tag = Config::load(&write(&tmp, "tag_weight = 9\n")).unwrap();
-        assert_eq!(
-            (
-                only_tag.title_weight,
-                only_tag.tag_weight,
-                only_tag.desc_weight
-            ),
-            (d.title_weight, 9.0, d.desc_weight)
-        );
-        let only_desc = Config::load(&write(&tmp, "desc_weight = 9\n")).unwrap();
-        assert_eq!(
-            (
-                only_desc.title_weight,
-                only_desc.tag_weight,
-                only_desc.desc_weight
-            ),
-            (d.title_weight, d.tag_weight, 9.0)
-        );
-        std::fs::remove_dir_all(&tmp).ok();
+    fn build_flags_outrank_file_keys() {
+        // Precedence: flag > file > default, and a flag on one knob must
+        // leave the file's other values standing.
+        let cfg = Config::parse("min_gap = 0.05\nrrf_alpha = 0.5\n", root())
+            .unwrap()
+            .with_scoring(ScoringFlags {
+                min_gap: Some(0.08),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(cfg.min_gap, 0.08, "flag must win");
+        assert_eq!(cfg.rrf_alpha, 0.5, "untouched file key must survive");
+        assert_eq!(cfg.min_cos, None, "untouched override must stay unset");
+    }
+
+    #[test]
+    fn empty_flags_are_the_identity() {
+        let base = Config::parse("min_gap = 0.08\nmin_cos = 0.0", root()).unwrap();
+        let same = base.clone().with_scoring(ScoringFlags::default()).unwrap();
+        assert_eq!(same.min_gap, base.min_gap);
+        assert_eq!(same.min_cos, base.min_cos);
+    }
+
+    #[test]
+    fn flags_hit_the_same_rails_as_file_keys() {
+        // The reason the validators are shared: a flag must not bake a
+        // value the parser would have rejected.
+        let base = Config::parse("", root()).unwrap();
+        for flags in [
+            ScoringFlags {
+                min_gap: Some(1.5),
+                ..Default::default()
+            },
+            ScoringFlags {
+                rrf_alpha: Some(-1.0),
+                ..Default::default()
+            },
+            ScoringFlags {
+                min_cos: Some(f32::NAN),
+                ..Default::default()
+            },
+        ] {
+            assert!(
+                base.clone().with_scoring(flags).is_err(),
+                "{flags:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn paths_resolve_against_the_config_root() {
+        let cfg = Config::parse("out = \"public/find\"", root()).unwrap();
+        assert_eq!(cfg.out, PathBuf::from("/site/public/find"));
     }
 }

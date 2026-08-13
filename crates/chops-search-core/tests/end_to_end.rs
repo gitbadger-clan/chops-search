@@ -85,6 +85,16 @@ fn build_artifacts_with(weights: FieldWeights) -> (Vec<u8>, Vec<u8>, Vec<u8>, Ve
         dim: DIM as u16,
         global_scale: gscale,
         weights,
+        // v5 scoring calibration, inert: this fixture is an
+        // UNCONFIGURED corpus, so it writes exactly what a
+        // chops-search.toml with no scoring keys writes — gate
+        // disarmed, plain RRF, floor derived from dims. The
+        // calibrated path is exercised by
+        // calibrated_scoring_reaches_the_engine, which mutates
+        // these on a read-back Index.
+        min_gap: 0.0,
+        rrf_alpha: 0.0,
+        min_cos: None,
         docs: vec![
             Doc {
                 url: "/beer-flood/".into(),
@@ -631,4 +641,29 @@ fn strong_top_bypasses_an_active_gate() {
     let report = e.search_detailed("granite");
     assert_eq!(report.semantic, SemanticStatus::Ranked);
     assert!(report.top.unwrap() > 0.5);
+}
+
+#[test]
+fn calibrated_scoring_reaches_the_engine() {
+    // The honesty-gap test: values written into index.bin must be the
+    // values the engine scores with, and an uncalibrated index must
+    // yield the derived floor and inert knobs.
+    let (meta_bytes, index_bytes, _rows, _prefix) = build_artifacts();
+    let mut index = Index::read(&index_bytes).unwrap();
+    index.min_gap = 0.08;
+    index.rrf_alpha = 1.0;
+    index.min_cos = Some(0.34);
+    let engine = Engine::new(&meta_bytes, &index.write()).unwrap();
+    let o = engine.score_opts();
+    assert_eq!(o.min_gap, 0.08);
+    assert_eq!(o.rrf_alpha, 1.0);
+    assert_eq!(o.min_cos, 0.34, "override must beat the derived floor");
+
+    index.min_cos = None;
+    let engine = Engine::new(&meta_bytes, &index.write()).unwrap();
+    assert_eq!(
+        engine.score_opts().min_cos,
+        chops_search_core::score::min_cos_for(engine.dim()),
+        "absent override must derive from dims"
+    );
 }

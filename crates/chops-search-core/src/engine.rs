@@ -146,6 +146,9 @@ impl Engine {
         }
         // Read off `index` before it moves into the struct literal below.
         let weights = index.weights;
+        let min_gap = index.min_gap;
+        let rrf_alpha = index.rrf_alpha;
+        let min_cos_override = index.min_cos;
         Ok(Engine {
             vocab,
             store,
@@ -157,18 +160,27 @@ impl Engine {
             best_chunk: vec![u32::MAX; n_docs],
             chunk_counts,
             doc_first_chunk,
-            // Two different provenances in one struct, deliberately:
+            // Two provenances in one struct, deliberately:
             //
-            // min_cos is DERIVED from geometry. The floor scales with
-            // dimensionality, so it cannot be a plain default: PCA raises
-            // noise cosines, and a value calibrated at 256 dims is too
-            // permissive at 128.
+            // min_cos is DERIVED from geometry unless the artifact says
+            // otherwise. The floor scales with dimensionality, so the
+            // default cannot be a constant: PCA raises noise cosines,
+            // and a value calibrated at 256 dims is too permissive at
+            // 128. An index-shipped override pins it instead — and an
+            // explicit 0.0 there means "floor off", which is why the
+            // format keeps absent and zero distinct.
             //
-            // The field weights are READ FROM THE ARTIFACT. They're
-            // corpus-dependent, not derivable, and index.bin is the only
-            // way the browser can learn what chops-search.toml said.
+            // min_gap, rrf_alpha, and the field weights are READ FROM
+            // THE ARTIFACT. They're corpus-calibrated, not derivable,
+            // and index.bin is the only way the browser can learn what
+            // chops-search.toml said. Their compiled defaults (0.0,
+            // inert) are what an unconfigured corpus writes, so the
+            // browser, a bare eval, and CI construct the same ScoreOpts
+            // from the same bytes.
             opts: crate::score::ScoreOpts {
-                min_cos: crate::score::min_cos_for(dim),
+                min_cos: min_cos_override.unwrap_or_else(|| crate::score::min_cos_for(dim)),
+                min_gap,
+                rrf_alpha,
                 weights,
                 ..Default::default()
             },

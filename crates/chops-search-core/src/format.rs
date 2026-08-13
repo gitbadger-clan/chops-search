@@ -1,78 +1,177 @@
-//! The two eager binary artifacts. Layouts are versioned and hand-rolled;
-//! JS never parses these — it pumps the bytes straight into the engine.
+//! Wire formats for the two eager artifacts: model.meta.bin (vocab and
+//! per-row scales) and index.bin (chunk vectors, docs, keyword postings,
+//! and the corpus's scoring configuration).
 //!
-//! `model.meta.bin` — must be COMPLETE before any query (WordPiece does
-//! longest-match over the full vocab; a partial vocab silently tokenizes
-//! differently and produces a wrong vector with no error):
+//! Everything is little-endian, length-prefixed, and written in one
+//! deterministic pass — two builds of the same inputs must be
+//! byte-identical, because the artifact filenames are content hashes and
+//! a nondeterministic byte forces every visitor to re-download.
 //!
-//!   magic "CHPM" | version u16 | dim u16 | n_rows u32 | prefix_rows u32
-//!   scales:  n_rows × f32                       (per-row dequant scales)
-//!   vocab:   n_rows × str16                     (index == id == matrix row)
+//! READS VALIDATE, NOT JUST PARSE. The engine trusts what comes out of
+//! here: chunk_doc entries and posting doc ids index into per-doc arrays
+//! unguarded, and in wasm an out-of-bounds panic is an aborted module,
+//! not a caught error. Likewise a NaN field weight NaNs every score it
+//! touches, a NaN min_gap silently disarms the corroboration gate
+//! (`gap < NaN` is false), and a NaN rrf_alpha NaNs every fused score —
+//! all quieter and worse than rejecting the artifact. So the readers
+//! reject anything the builder cannot legitimately produce, and the
+//! scoring rails here mirror the config parser's rails exactly: an
+//! artifact must not be able to carry a value chops-search.toml would
+//! have refused.
 //!
-//! `index.bin` — chunk vectors + doc metadata + keyword postings. Small
-//! (tens of KB for a blog), loads with the meta:
+//! VERSIONING. One version constant per artifact, checked strictly on
+//! read: a mismatch is a rebuild instruction, never a defaulted parse.
+//! The manifest hash already guarantees a browser can never pair a new
+//! runtime with an old index (the filenames change together), so the
+//! only party who can hit the version error is a developer running a
+//! stale out/ against a newer binary, and that developer wants a loud
+//! message, not a silently disarmed gate. Breaking changes batch into a
+//! single bump so users rebuild once, not once per knob.
 //!
-//!   magic "CHPI" | version u16 | dim u16 | gscale f32
-//!   w_title f32 | w_tag f32 | w_desc f32        (BM25F field weights)
-//!   n_docs u16 | docs: n_docs × { url str16, title str16 }
-//!   n_chunks u32 | chunk_doc: n_chunks × u16
-//!   chunk_vecs: n_chunks × dim × i8
-//!   n_terms u32 | terms: n_terms × { term str16, n_post u16,
-//!                                    postings n_post × { doc u16, title u16,
-//!                                      tag u16, desc u16, body u16 } }
+//! The v5 batch also renamed the magics (CHPM/CHPI → CSMM/CSIX) and
+//! widened the version field to u32, which would have made the rebuild
+//! message unreachable by its one intended audience — a stale v4 out/
+//! fails the MAGIC check, not the version check. The readers therefore
+//! recognize the legacy magics specifically, to say "rebuild" rather
+//! than the confusing "not an index.bin" (it is one; it's just old).
 //!
-//! The field weights are stored rather than compiled in because the right
-//! values are corpus-dependent — the same reason `min_cos` will be — and
-//! because the browser has no other way to learn what
-//! `chops-search.toml` said. The CLI can still override them per run for
-//! sweeps, which is the whole point: whether a field earns its weight is
-//! a question about a corpus, answerable with a flag rather than a
-//! rebuild.
+//! Index version history:
+//!   v3  compound terms join the postings (df semantics change)
+//!   v4  BM25F: per-field tfs in postings, field weights in the header
+//!   v5  scoring calibration: min_gap, rrf_alpha, optional min_cos
+//!       override ride next to the weights, same provenance argument —
+//!       a value calibrated against a corpus travels with the corpus,
+//!       and index.bin is the only way the browser learns it
 //!
-//! The row matrix itself (`model.rows.i8`) is deliberately headerless raw
-//! bytes so that row i sits at byte offset exactly i × dim — that identity
-//! is what makes HTTP range requests trivial. `model.prefix.i8` is a
-//! verbatim copy of its first prefix_rows × dim bytes, published as a
-//! separate file so the eager part is a plain cacheable GET instead of a
-//! range request.
+//! model.meta.bin is at version 2: the v5 batch rewrote its header too
+//! (new magic, u32 version field, header field order), so it bumped in
+//! the same batch even though it carries no scoring — the two artifacts
+//! are rebuilt together and their version discipline moves together.
+//!
+//! THE min_cos ENCODING. "Absent" and "0.0" are different claims: absent
+//! means "derive the floor from dimensionality at construction" and 0.0
+//! means "floor off" (floors disable at zero, per the knob convention).
+//! The wire keeps them distinct with a fixed-width presence flag — one
+//! u8 followed by an f32 that is written as 0.0 when absent and ignored
+//! on read. Fixed width rather than conditional so the layout is
+//! trivially seekable and the absent case has exactly one byte
+//! representation, which byte-stability requires.
+
+use std::collections::HashMap;
 
 use crate::FormatError;
 use crate::bytes::{Reader, Writer};
 use crate::keyword::{FieldWeights, KeywordIndex};
-use std::collections::HashMap;
 
-const MAGIC_MODEL: &[u8; 4] = b"CHPM";
-const MAGIC_INDEX: &[u8; 4] = b"CHPI";
-/// 3 introduced BM25F (postings 4 → 8 bytes, field weights in the header).
-/// 4 added the description field (postings 8 → 10 bytes). Every bump so
-/// far has widened the posting record, which is exactly why the version
-/// check matters: every field is a u16 and nothing in the byte stream
-/// announces its own shape, so an old reader would parse a new file into
-/// plausible garbage rather than failing. Both artifacts share the
-/// constant and are rebuilt together; the meta layout is unchanged since 2.
-const VERSION: u16 = 4;
+/// index.bin magic + version.
+pub const INDEX_MAGIC: &[u8; 4] = b"CSIX";
+pub const INDEX_VERSION: u32 = 5;
 
+/// model.meta.bin magic + version.
+pub const META_MAGIC: &[u8; 4] = b"CSMM";
+pub const META_VERSION: u32 = 2;
+
+/// Pre-v5 magics, recognized only to emit the rebuild message. Never
+/// parsed: the old layouts had a u16 version where the u32 now sits.
+const LEGACY_INDEX_MAGIC: &[u8; 4] = b"CHPI";
+const LEGACY_META_MAGIC: &[u8; 4] = b"CHPM";
+
+/// One indexed document, in doc-id order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Doc {
+    pub url: String,
+    pub title: String,
+}
+
+/// One term's occurrence counts in one document, per BM25F field. Raw
+/// counts — the weights apply at query time, after per-field length
+/// normalization (see keyword.rs for why pre-multiplying here was a bug).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Posting {
+    pub doc: u16,
+    pub title: u16,
+    pub tag: u16,
+    pub desc: u16,
+    pub body: u16,
+}
+
+/// The vocab-and-scales artifact. Complete and eager: the engine cannot
+/// tokenize without the full vocabulary, and the per-row scales are what
+/// make range-fetched int8 rows meaningful.
+#[derive(Debug, Clone, PartialEq)]
 pub struct ModelMeta {
     pub dim: u16,
     pub prefix_rows: u32,
+    /// One dequantization scale per row, row order.
     pub scales: Vec<f32>,
-    /// Ordered by id; id == matrix row (frequency order is baked in at
-    /// build time by renumbering, so no remap table exists at runtime).
+    /// One token per row, row (frequency) order.
     pub tokens: Vec<String>,
 }
 
-impl ModelMeta {
-    pub fn n_rows(&self) -> u32 {
-        self.tokens.len() as u32
-    }
+/// The corpus artifact: everything the engine needs at construction.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Index {
+    pub dim: u16,
+    /// Global dequantization scale for chunk_vecs.
+    pub global_scale: f32,
+    /// BM25F field weights the corpus was built with (v4).
+    pub weights: FieldWeights,
+    /// Corroboration gate threshold (v5). 0.0 ships the gate disarmed,
+    /// which is also the compiled default, so absent-in-config and
+    /// written-as-zero coincide harmlessly.
+    pub min_gap: f32,
+    /// Confidence-weighted fusion coefficient (v5). 0.0 is plain RRF.
+    pub rrf_alpha: f32,
+    /// Relevance-floor override (v5). None: derive from dim at engine
+    /// construction. Some(0.0): floor off. Different engines — see the
+    /// module header for the wire encoding that keeps them distinct.
+    pub min_cos: Option<f32>,
+    pub docs: Vec<Doc>,
+    /// chunk index → doc id, contiguous per doc in doc order.
+    pub chunk_doc: Vec<u16>,
+    /// n_chunks × dim int8, chunk order.
+    pub chunk_vecs: Vec<i8>,
+    /// term → postings, terms sorted, postings by ascending doc id.
+    /// A Vec of pairs rather than a map so the artifact is byte-stable.
+    pub terms: Vec<(String, Vec<Posting>)>,
+}
 
+// ---------------------------------------------------------------------
+// Scoring rails, shared shape with config.rs
+// ---------------------------------------------------------------------
+
+/// min_gap and min_cos are cosine-space quantities; outside 0..=1 is a
+/// unit error, and NaN silently changes engine behavior (see the module
+/// header). Same range the config parser enforces.
+fn check_cosine(v: f32, what: &'static str) -> Result<(), FormatError> {
+    if !v.is_finite() || !(0.0..=1.0).contains(&v) {
+        return Err(FormatError::Inconsistent(what));
+    }
+    Ok(())
+}
+
+fn check_alpha(v: f32) -> Result<(), FormatError> {
+    if !v.is_finite() || !(0.0..=100.0).contains(&v) {
+        return Err(FormatError::Inconsistent(
+            "rrf_alpha out of range (0..=100)",
+        ));
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------
+// ModelMeta
+// ---------------------------------------------------------------------
+
+impl ModelMeta {
     pub fn write(&self) -> Vec<u8> {
+        debug_assert_eq!(self.scales.len(), self.tokens.len(), "one scale per row");
         let mut w = Writer::new();
-        w.buf.extend_from_slice(MAGIC_MODEL);
-        w.u16(VERSION);
+        w.buf.extend_from_slice(META_MAGIC);
+        w.u32(META_VERSION);
         w.u16(self.dim);
-        w.u32(self.tokens.len() as u32);
         w.u32(self.prefix_rows);
+        w.u32(self.scales.len() as u32);
         for &s in &self.scales {
             w.f32(s);
         }
@@ -82,17 +181,27 @@ impl ModelMeta {
         w.buf
     }
 
-    pub fn read(buf: &[u8]) -> Result<Self, FormatError> {
-        let mut r = Reader::new(buf);
-        if r.take(4)? != MAGIC_MODEL {
-            return Err(FormatError::BadHeader);
+    pub fn read(bytes: &[u8]) -> Result<Self, FormatError> {
+        let mut r = Reader::new(bytes);
+        let magic = r.take(4)?;
+        if magic == LEGACY_META_MAGIC {
+            return Err(FormatError::Inconsistent(
+                "model.meta.bin was built by an older chops-search version; \
+                 run `chops-search build` to regenerate",
+            ));
         }
-        if r.u16()? != VERSION {
-            return Err(FormatError::BadHeader);
+        if magic != META_MAGIC {
+            return Err(FormatError::Inconsistent("not a model.meta.bin"));
+        }
+        if r.u32()? != META_VERSION {
+            return Err(FormatError::Inconsistent(
+                "model.meta.bin was built by a different chops-search version; \
+                 run `chops-search build` to regenerate",
+            ));
         }
         let dim = r.u16()?;
-        let n_rows = r.u32()? as usize;
         let prefix_rows = r.u32()?;
+        let n_rows = r.u32()? as usize;
         if dim == 0 || n_rows == 0 {
             return Err(FormatError::Inconsistent("zero dim or rows"));
         }
@@ -104,6 +213,9 @@ impl ModelMeta {
         for _ in 0..n_rows {
             tokens.push(r.str16()?.to_owned());
         }
+        if r.remaining() != 0 {
+            return Err(FormatError::Inconsistent("trailing bytes after artifact"));
+        }
         Ok(ModelMeta {
             dim,
             prefix_rows,
@@ -113,70 +225,59 @@ impl ModelMeta {
     }
 }
 
-pub struct Doc {
-    pub url: String,
-    pub title: String,
-}
-
-/// Per-field term frequencies for one document. Fields are separate
-/// rather than pre-multiplied because BM25F normalizes each field by
-/// its own length: a term in a 5-word title should score like a term
-/// in a 5-word field, not get averaged against 2,000 words of body.
-///
-/// `desc` is Zola's front-matter description. It has its own field rather
-/// than being folded into body for two reasons, neither of which is
-/// recall: counting it as body inflated `dl_body`, so a longer
-/// description quietly discounted every other term on the page; and a
-/// field is the only way to make "should descriptions count here?" a
-/// query-time flag instead of a rebuild.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Posting {
-    pub doc: u16,
-    pub title: u16,
-    pub tag: u16,
-    pub desc: u16,
-    pub body: u16,
-}
-
-pub struct Index {
-    pub dim: u16,
-    pub global_scale: f32,
-    /// BM25F field weights this index was built to be scored with. Body
-    /// is implicitly 1.0, so these three are the whole knob set.
-    pub weights: FieldWeights,
-    pub docs: Vec<Doc>,
-    /// chunk index → doc id
-    pub chunk_doc: Vec<u16>,
-    /// n_chunks × dim
-    pub chunk_vecs: Vec<i8>,
-    /// term → postings, each carrying per-field term frequencies
-    pub terms: Vec<(String, Vec<Posting>)>,
-}
+// ---------------------------------------------------------------------
+// Index
+// ---------------------------------------------------------------------
 
 impl Index {
     pub fn write(&self) -> Vec<u8> {
         let mut w = Writer::new();
-        w.buf.extend_from_slice(MAGIC_INDEX);
-        w.u16(VERSION);
+        w.buf.extend_from_slice(INDEX_MAGIC);
+        w.u32(INDEX_VERSION);
         w.u16(self.dim);
         w.f32(self.global_scale);
+
+        // v4: the field weights the corpus was built with.
         w.f32(self.weights.title);
         w.f32(self.weights.tag);
         w.f32(self.weights.desc);
+
+        // v5: scoring calibration, same provenance as the weights.
+        w.f32(self.min_gap);
+        w.f32(self.rrf_alpha);
+        // Presence flag + fixed-width value; the absent case writes 0.0
+        // so there is exactly one byte representation of "derive".
+        match self.min_cos {
+            Some(v) => {
+                w.u8(1);
+                w.f32(v);
+            }
+            None => {
+                w.u8(0);
+                w.f32(0.0);
+            }
+        }
+
         w.u16(self.docs.len() as u16);
         for d in &self.docs {
             w.str16(&d.url);
             w.str16(&d.title);
         }
+
         w.u32(self.chunk_doc.len() as u32);
-        for &cd in &self.chunk_doc {
-            w.u16(cd);
+        for &c in &self.chunk_doc {
+            w.u16(c);
         }
+        debug_assert_eq!(
+            self.chunk_vecs.len(),
+            self.chunk_doc.len() * self.dim as usize
+        );
         w.i8s(&self.chunk_vecs);
+
         w.u32(self.terms.len() as u32);
         for (term, postings) in &self.terms {
             w.str16(term);
-            w.u16(postings.len() as u16);
+            w.u32(postings.len() as u32);
             for p in postings {
                 w.u16(p.doc);
                 w.u16(p.title);
@@ -188,13 +289,28 @@ impl Index {
         w.buf
     }
 
-    pub fn read(buf: &[u8]) -> Result<Self, FormatError> {
-        let mut r = Reader::new(buf);
-        if r.take(4)? != MAGIC_INDEX {
-            return Err(FormatError::BadHeader);
+    pub fn read(bytes: &[u8]) -> Result<Self, FormatError> {
+        let mut r = Reader::new(bytes);
+        let magic = r.take(4)?;
+        if magic == LEGACY_INDEX_MAGIC {
+            return Err(FormatError::Inconsistent(
+                "index.bin was built by an older chops-search version; \
+                 run `chops-search build` to regenerate",
+            ));
         }
-        if r.u16()? != VERSION {
-            return Err(FormatError::BadHeader);
+        if magic != INDEX_MAGIC {
+            return Err(FormatError::Inconsistent("not an index.bin"));
+        }
+        if r.u32()? != INDEX_VERSION {
+            // Strict on purpose: the manifest hash means browsers never
+            // see a mismatched pair, so the only reader who can land
+            // here is a developer with a stale out/, and a defaulted
+            // parse would hand them a silently different engine (gate
+            // disarmed, fusion unweighted) instead of this sentence.
+            return Err(FormatError::Inconsistent(
+                "index.bin was built by a different chops-search version; \
+                 run `chops-search build` to regenerate",
+            ));
         }
         let dim = r.u16()?;
         let global_scale = r.f32()?;
@@ -210,6 +326,25 @@ impl Index {
         if !weights.is_sane() {
             return Err(FormatError::Inconsistent("field weight out of range"));
         }
+
+        let min_gap = r.f32()?;
+        check_cosine(min_gap, "min_gap out of range (0..=1)")?;
+        let rrf_alpha = r.f32()?;
+        check_alpha(rrf_alpha)?;
+        let min_cos = match r.u8()? {
+            0 => {
+                // The value slot is fixed-width; consume and discard.
+                let _ = r.f32()?;
+                None
+            }
+            1 => {
+                let v = r.f32()?;
+                check_cosine(v, "min_cos override out of range (0..=1)")?;
+                Some(v)
+            }
+            _ => return Err(FormatError::Inconsistent("bad min_cos presence flag")),
+        };
+
         let n_docs = r.u16()? as usize;
         let mut docs = Vec::with_capacity(n_docs);
         for _ in 0..n_docs {
@@ -217,9 +352,13 @@ impl Index {
             let title = r.str16()?.to_owned();
             docs.push(Doc { url, title });
         }
+
         let n_chunks = r.u32()? as usize;
         let mut chunk_doc = Vec::with_capacity(n_chunks);
         for _ in 0..n_chunks {
+            // Bounds-checked HERE because the engine indexes per-doc
+            // arrays with these unguarded — in wasm that panic is an
+            // aborted module, not a caught error.
             let d = r.u16()?;
             if d as usize >= n_docs {
                 return Err(FormatError::Inconsistent("chunk points past docs"));
@@ -227,35 +366,39 @@ impl Index {
             chunk_doc.push(d);
         }
         let chunk_vecs = r.i8s(n_chunks * dim as usize)?;
+
         let n_terms = r.u32()? as usize;
         let mut terms = Vec::with_capacity(n_terms);
         for _ in 0..n_terms {
             let term = r.str16()?.to_owned();
-            let n_post = r.u16()? as usize;
-            let mut postings: Vec<Posting> = Vec::with_capacity(n_post);
+            let n_post = r.u32()? as usize;
+            let mut postings = Vec::with_capacity(n_post);
             for _ in 0..n_post {
-                let doc = r.u16()?;
-                let title = r.u16()?;
-                let tag = r.u16()?;
-                let desc = r.u16()?;
-                let body = r.u16()?;
-                if doc as usize >= n_docs {
+                let p = Posting {
+                    doc: r.u16()?,
+                    title: r.u16()?,
+                    tag: r.u16()?,
+                    desc: r.u16()?,
+                    body: r.u16()?,
+                };
+                if p.doc as usize >= n_docs {
                     return Err(FormatError::Inconsistent("posting points past docs"));
                 }
-                postings.push(Posting {
-                    doc,
-                    title,
-                    tag,
-                    desc,
-                    body,
-                });
+                postings.push(p);
             }
             terms.push((term, postings));
         }
+        if r.remaining() != 0 {
+            return Err(FormatError::Inconsistent("trailing bytes after artifact"));
+        }
+
         Ok(Index {
             dim,
             global_scale,
             weights,
+            min_gap,
+            rrf_alpha,
+            min_cos,
             docs,
             chunk_doc,
             chunk_vecs,
@@ -263,11 +406,12 @@ impl Index {
         })
     }
 
-    /// The keyword half of this index. Weights are deliberately NOT baked
-    /// in here: they live in `ScoreOpts`, seeded from `weights` at engine
-    /// construction, so eval can sweep them without a rebuild.
+    /// Build the query-time keyword structure from the serialized
+    /// postings. The map is rebuilt at load rather than serialized: the
+    /// artifact stays a sorted list (byte-stable), and per-field lengths
+    /// are derived in KeywordIndex::new.
     pub fn keyword_index(&self) -> KeywordIndex {
-        let mut map: HashMap<Box<str>, Vec<Posting>> = HashMap::new();
+        let mut map: HashMap<Box<str>, Vec<Posting>> = HashMap::with_capacity(self.terms.len());
         for (term, postings) in &self.terms {
             map.insert(Box::from(term.as_str()), postings.clone());
         }
@@ -279,50 +423,8 @@ impl Index {
 mod tests {
     use super::*;
 
-    fn post(doc: u16, title: u16, tag: u16, desc: u16, body: u16) -> Posting {
-        Posting {
-            doc,
-            title,
-            tag,
-            desc,
-            body,
-        }
-    }
-
-    fn index_with(weights: FieldWeights, postings: Vec<Posting>) -> Index {
+    fn sample_index(min_cos: Option<f32>) -> Index {
         Index {
-            dim: 1,
-            global_scale: 0.01,
-            weights,
-            docs: vec![Doc {
-                url: "/a/".into(),
-                title: "A".into(),
-            }],
-            chunk_doc: vec![0],
-            chunk_vecs: vec![1],
-            terms: vec![("a".into(), postings)],
-        }
-    }
-
-    #[test]
-    fn model_meta_roundtrip() {
-        let m = ModelMeta {
-            dim: 4,
-            prefix_rows: 1,
-            scales: vec![0.5, 0.25],
-            tokens: vec!["the".into(), "##s".into()],
-        };
-        let bytes = m.write();
-        let back = ModelMeta::read(&bytes).unwrap();
-        assert_eq!(back.dim, 4);
-        assert_eq!(back.prefix_rows, 1);
-        assert_eq!(back.scales, vec![0.5, 0.25]);
-        assert_eq!(back.tokens, vec!["the".to_string(), "##s".to_string()]);
-    }
-
-    #[test]
-    fn index_roundtrip() {
-        let idx = Index {
             dim: 2,
             global_scale: 0.01,
             weights: FieldWeights {
@@ -330,82 +432,238 @@ mod tests {
                 tag: 4.0,
                 desc: 1.0,
             },
-            docs: vec![Doc {
-                url: "/a/".into(),
-                title: "A".into(),
-            }],
-            chunk_doc: vec![0, 0],
-            chunk_vecs: vec![1, -2, 3, -4],
-            terms: vec![("pydub".into(), vec![post(0, 1, 2, 3, 4)])],
-        };
-        let bytes = idx.write();
-        let back = Index::read(&bytes).unwrap();
-        assert_eq!(back.docs.len(), 1);
-        assert_eq!(back.chunk_vecs, vec![1, -2, 3, -4]);
-        assert_eq!(back.terms[0].0, "pydub");
-        // Every field survives independently and in order: the four tfs
-        // are distinct values precisely so a transposed pair in write or
-        // read cannot pass this.
-        assert_eq!(back.terms[0].1, vec![post(0, 1, 2, 3, 4)]);
-        assert_eq!(back.weights.title, 2.0);
-        assert_eq!(back.weights.tag, 4.0);
-        assert_eq!(back.weights.desc, 1.0);
+            min_gap: 0.08,
+            rrf_alpha: 1.0,
+            min_cos,
+            docs: vec![
+                Doc {
+                    url: "/a/".into(),
+                    title: "A".into(),
+                },
+                Doc {
+                    url: "/b/".into(),
+                    title: "B page".into(),
+                },
+            ],
+            chunk_doc: vec![0, 0, 1],
+            chunk_vecs: vec![1, -2, 3, -4, 5, -6],
+            terms: vec![
+                (
+                    "alpha".into(),
+                    vec![Posting {
+                        doc: 0,
+                        title: 1,
+                        tag: 0,
+                        desc: 0,
+                        body: 2,
+                    }],
+                ),
+                (
+                    "beta".into(),
+                    vec![
+                        Posting {
+                            doc: 0,
+                            title: 0,
+                            tag: 1,
+                            desc: 0,
+                            body: 0,
+                        },
+                        Posting {
+                            doc: 1,
+                            title: 0,
+                            tag: 0,
+                            desc: 2,
+                            body: 3,
+                        },
+                    ],
+                ),
+            ],
+        }
     }
 
     #[test]
-    fn zero_weights_are_legal() {
-        // w_desc = 0 is the "does this field earn its keep" sweep point,
-        // and the reason the field exists as a field at all.
-        let idx = index_with(
-            FieldWeights {
-                title: 0.0,
-                tag: 0.0,
-                desc: 0.0,
-            },
-            vec![post(0, 0, 0, 1, 1)],
+    fn index_round_trips_including_v5_fields() {
+        let idx = sample_index(None);
+        let got = Index::read(&idx.write()).unwrap();
+        assert_eq!(got, idx);
+        assert_eq!(got.min_gap, 0.08);
+        assert_eq!(got.rrf_alpha, 1.0);
+    }
+
+    #[test]
+    fn min_cos_three_states_are_distinguishable() {
+        // The encoding's entire job: absent ("derive from dims"),
+        // explicit 0.0 ("floor off"), and explicit 0.28 are three
+        // different engines, and the wire must never conflate the first
+        // two even though their value bytes are identical.
+        for state in [None, Some(0.0), Some(0.28)] {
+            let idx = sample_index(state);
+            let got = Index::read(&idx.write()).unwrap();
+            assert_eq!(got.min_cos, state, "state {state:?} did not survive");
+        }
+        // And the absent/zero pair specifically differ on the wire.
+        assert_ne!(
+            sample_index(None).write(),
+            sample_index(Some(0.0)).write(),
+            "absent and zero must have different byte representations"
         );
-        let back = Index::read(&idx.write()).unwrap();
-        assert_eq!(back.weights.title, 0.0);
-        assert_eq!(back.weights.tag, 0.0);
-        assert_eq!(back.weights.desc, 0.0);
     }
 
     #[test]
-    fn bad_magic_rejected() {
-        assert_eq!(
-            ModelMeta::read(b"XXXX0000").err(),
-            Some(FormatError::BadHeader)
+    fn writes_are_byte_stable() {
+        // The filenames are content hashes; a nondeterministic byte is a
+        // forced re-download for every visitor.
+        let idx = sample_index(Some(0.28));
+        assert_eq!(idx.write(), idx.write());
+    }
+
+    #[test]
+    fn wrong_version_is_rejected_with_a_rebuild_message() {
+        let mut bytes = sample_index(None).write();
+        // Corrupt the version field (bytes 4..8).
+        bytes[4] = bytes[4].wrapping_add(1);
+        let err = Index::read(&bytes).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("chops-search build"),
+            "version error must tell the reader how to fix it: {msg}"
         );
     }
 
     #[test]
-    fn stale_version_rejected() {
-        // The v3 posting record was 8 bytes against v4's 10. Reading one
-        // as the other must fail at the header, not at the postings.
-        let mut bytes = index_with(FieldWeights::default(), vec![post(0, 0, 0, 0, 1)]).write();
-        bytes[4..6].copy_from_slice(&3u16.to_le_bytes());
-        assert_eq!(Index::read(&bytes).err(), Some(FormatError::BadHeader));
+    fn legacy_magics_get_the_rebuild_message_too() {
+        // The stale-out/ developer the version check was designed for
+        // never reaches it: a v4 file fails at the MAGIC check, because
+        // the magics were renamed in the same batch. "Not an index.bin"
+        // would be actively confusing (it is one; it's just old), so the
+        // legacy magics are recognized specifically.
+        let err = Index::read(b"CHPI").unwrap_err();
+        assert!(format!("{err}").contains("chops-search build"));
+        let err = ModelMeta::read(b"CHPM").unwrap_err();
+        assert!(format!("{err}").contains("chops-search build"));
+        // Genuinely foreign bytes still get the blunt answer.
+        let err = Index::read(b"XXXXxxxx").unwrap_err();
+        assert!(format!("{err}").contains("not an index.bin"));
     }
 
     #[test]
-    fn nonsense_weights_rejected() {
-        let bytes = index_with(FieldWeights::default(), vec![post(0, 0, 0, 0, 1)]).write();
-        // w_title sits at magic(4) + version(2) + dim(2) + gscale(4) = 12,
-        // then w_tag at 16 and w_desc at 20.
-        for at in [12usize, 16, 20] {
-            let mut b = bytes.clone();
-            b[at..at + 4].copy_from_slice(&f32::NAN.to_le_bytes());
-            assert_eq!(
-                Index::read(&b).err(),
-                Some(FormatError::Inconsistent("field weight out of range")),
-                "NaN at byte {at} was accepted"
+    fn insane_weights_are_rejected_on_read() {
+        // Each field checked, not just the first: a validator that
+        // forgets one is exactly the bug this catches.
+        for bad in [f32::NAN, -1.0, f32::INFINITY, 1e6] {
+            let mut idx = sample_index(None);
+            idx.weights.title = bad;
+            assert!(Index::read(&idx.write()).is_err(), "title {bad} accepted");
+            let mut idx = sample_index(None);
+            idx.weights.tag = bad;
+            assert!(Index::read(&idx.write()).is_err(), "tag {bad} accepted");
+            let mut idx = sample_index(None);
+            idx.weights.desc = bad;
+            assert!(Index::read(&idx.write()).is_err(), "desc {bad} accepted");
+        }
+    }
+
+    #[test]
+    fn corrupt_scoring_calibration_is_rejected() {
+        // The quiet failures these rails exist for: a NaN min_gap never
+        // gates (gap < NaN is false), a NaN alpha NaNs every fused
+        // score. Both must die at read, not at ranking.
+        for bad in [f32::NAN, -0.1, 1.5] {
+            let mut idx = sample_index(None);
+            idx.min_gap = bad;
+            assert!(Index::read(&idx.write()).is_err(), "min_gap {bad} accepted");
+            let mut idx = sample_index(None);
+            idx.min_cos = Some(bad);
+            assert!(Index::read(&idx.write()).is_err(), "min_cos {bad} accepted");
+        }
+        for bad in [f32::NAN, -1.0, 1e6] {
+            let mut idx = sample_index(None);
+            idx.rrf_alpha = bad;
+            assert!(
+                Index::read(&idx.write()).is_err(),
+                "rrf_alpha {bad} accepted"
             );
         }
-        let mut b = bytes.clone();
-        b[20..24].copy_from_slice(&(-1.0f32).to_le_bytes());
-        assert_eq!(
-            Index::read(&b).err(),
-            Some(FormatError::Inconsistent("field weight out of range"))
-        );
+        // The legal edges survive: 0.0 and 1.0 are meaningful values
+        // (disarmed / whole range), not out-of-range near-misses.
+        for edge in [0.0f32, 1.0] {
+            let mut idx = sample_index(Some(edge));
+            idx.min_gap = edge;
+            assert_eq!(Index::read(&idx.write()).unwrap(), idx);
+        }
+    }
+
+    #[test]
+    fn chunk_pointing_past_docs_is_rejected() {
+        // The engine indexes per-doc arrays with chunk_doc unguarded; in
+        // wasm that panic aborts the module. This is the read-side
+        // license for that trust.
+        let mut idx = sample_index(None);
+        idx.chunk_doc[2] = 99;
+        assert!(Index::read(&idx.write()).is_err());
+    }
+
+    #[test]
+    fn posting_pointing_past_docs_is_rejected() {
+        let mut idx = sample_index(None);
+        idx.terms[0].1[0].doc = 99;
+        assert!(Index::read(&idx.write()).is_err());
+    }
+
+    #[test]
+    fn truncated_index_fails_loudly() {
+        let bytes = sample_index(None).write();
+        assert!(Index::read(&bytes[..bytes.len() - 3]).is_err());
+        assert!(Index::read(&bytes[..10]).is_err());
+    }
+
+    #[test]
+    fn trailing_bytes_are_rejected() {
+        let mut bytes = sample_index(None).write();
+        bytes.push(0);
+        assert!(Index::read(&bytes).is_err());
+    }
+
+    #[test]
+    fn model_meta_round_trips() {
+        let meta = ModelMeta {
+            dim: 2,
+            prefix_rows: 1,
+            scales: vec![0.5, 0.25, 0.125],
+            tokens: vec!["a".into(), "##b".into(), "long-token".into()],
+        };
+        assert_eq!(ModelMeta::read(&meta.write()).unwrap(), meta);
+    }
+
+    #[test]
+    fn meta_rejects_impossible_shapes() {
+        // Zero dim or rows: nothing downstream can do anything with the
+        // matrix, and RowStore would allocate a zero-size buffer and
+        // then divide by dim.
+        let meta = ModelMeta {
+            dim: 0,
+            prefix_rows: 0,
+            scales: vec![],
+            tokens: vec![],
+        };
+        assert!(ModelMeta::read(&meta.write()).is_err());
+        // A prefix claiming more rows than the matrix has: the JS pump
+        // would ingest past the end.
+        let meta = ModelMeta {
+            dim: 2,
+            prefix_rows: 5,
+            scales: vec![1.0],
+            tokens: vec!["a".into()],
+        };
+        assert!(ModelMeta::read(&meta.write()).is_err());
+    }
+
+    #[test]
+    fn keyword_index_carries_the_postings() {
+        let idx = sample_index(None);
+        let kw = idx.keyword_index();
+        assert_eq!(kw.n_docs, 2);
+        assert_eq!(kw.terms.len(), 2);
+        assert_eq!(kw.terms["beta"].len(), 2);
     }
 }
