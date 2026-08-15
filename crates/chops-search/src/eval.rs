@@ -37,29 +37,42 @@ const GREEN: Style = AnsiColor::Green.on_default();
 const YELLOW: Style = AnsiColor::Yellow.on_default();
 const RED: Style = AnsiColor::Red.on_default().bold();
 const HEADING: Style = Style::new().bold();
-struct Case {
-    q: String,
-    expect: Vec<String>,
-    kind: String,
+
+pub(crate) struct Case {
+    pub(crate) q: String,
+    pub(crate) expect: Vec<String>,
+    pub(crate) kind: String,
 }
 
 #[derive(Default)]
-struct Tally {
-    n: usize,
-    hit1: usize,
-    hit3: usize,
+pub(crate) struct Tally {
+    pub(crate) n: usize,
+    pub(crate) hit1: usize,
+    pub(crate) hit3: usize,
+}
+/// One case's verdict under one ScoreOpts — the diffing primitive.
+/// Passes over the same list diff by index; totals are forbidden as a
+/// comparison basis, since a +2/−2 wash prints as zero.
+#[derive(Debug, Clone)]
+pub(crate) struct CaseOutcome {
+    pub(crate) kind: String,
+    pub(crate) q: String,
+    pub(crate) hit1: bool,
+    pub(crate) hit3: bool,
 }
 
 /// One full run of the case set under one ScoreOpts: the tallies, the
 /// misses, and what the byte path cost. Sweep mode produces many of
 /// these; normal mode exactly one.
 #[derive(Default)]
-struct Pass {
+pub(crate) struct Pass {
     by_kind: BTreeMap<String, Tally>,
-    overall: Tally,
+    pub(crate) overall: Tally,
     failures: Vec<(String, String, Vec<String>)>,
     fetched: Vec<u64>,
     cold: usize,
+    /// Per-case verdicts in case order. See CaseOutcome.
+    pub(crate) outcomes: Vec<CaseOutcome>,
 }
 
 /// Scoring overrides from the command line. `None` means "whatever the
@@ -216,49 +229,91 @@ pub struct EvalArgs {
 /// must be the bytes behind the engine that ranked, and four separate
 /// parameters are exactly how a call site pairs an engine with someone
 /// else's index — the stale-artifact bug as an API shape.
-struct EvalCtx<'a> {
-    engine: &'a mut Engine,
+pub(crate) struct EvalCtx<'a> {
+    pub(crate) engine: &'a mut Engine,
     meta_bytes: &'a [u8],
     index_bytes: &'a [u8],
-    rows_bytes: &'a [u8],
+    pub(crate) rows_bytes: &'a [u8],
 }
 
-pub fn eval(artifacts: &Path, queries: &Path, args: &EvalArgs) -> Result<()> {
-    let cases = load_cases(queries, args.kind_filter.as_deref())?;
-    if cases.is_empty() {
-        bail!("no cases matched (check --kind)");
+impl EvalCtx<'_> {
+    /// Explain on this ctx's own engine and the bytes behind it — the
+    /// pairing invariant as a method instead of three parameters a
+    /// caller could mismatch.
+    pub(crate) fn explain(&mut self, q: &str, limit: usize) -> Result<()> {
+        crate::explain::print_report(self.engine, self.meta_bytes, self.index_bytes, q, limit)
+    }
+}
+
+/// The owning counterpart of EvalCtx: the engine plus the bytes it was
+/// built from, for callers that outlive one stack frame — calibrate
+/// runs dozens of passes over a single load. EvalCtx stays the borrowed
+/// view every pass and explain goes through, so the two commands cannot
+/// pair an engine with someone else's index.
+pub(crate) struct LoadedCtx {
+    engine: Engine,
+    meta_bytes: Vec<u8>,
+    index_bytes: Vec<u8>,
+    rows_bytes: Vec<u8>,
+}
+
+impl LoadedCtx {
+    /// Artifacts exactly as the worker fetches them, prefix ingested,
+    /// scoring applied on top of what the engine derived — same
+    /// no-Default rationale as eval(): the floor and weights come from
+    /// index.bin.
+    pub(crate) fn load(artifacts: &Path, args: &ScoreArgs) -> Result<(LoadedCtx, ScoreOpts)> {
+        let a = crate::artifacts::resolve(artifacts)?;
+        let meta_bytes = fs::read(&a.meta).with_context(|| format!("{}", a.meta.display()))?;
+        let index_bytes = fs::read(&a.index).with_context(|| format!("{}", a.index.display()))?;
+        let prefix_bytes =
+            fs::read(&a.prefix).with_context(|| format!("{}", a.prefix.display()))?;
+        let rows_bytes = fs::read(&a.rows).with_context(|| format!("{}", a.rows.display()))?;
+
+        let mut engine =
+            Engine::new(&meta_bytes, &index_bytes).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let opts = args.apply(engine.score_opts());
+        engine.set_score_opts(opts);
+        engine
+            .ingest(0, &prefix_bytes)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok((
+            LoadedCtx {
+                engine,
+                meta_bytes,
+                index_bytes,
+                rows_bytes,
+            },
+            opts,
+        ))
     }
 
-    // ---- Artifacts, exactly as the worker fetches them -----------------
-    let a = crate::artifacts::resolve(artifacts)?;
-    let meta_bytes = fs::read(&a.meta).with_context(|| format!("{}", a.meta.display()))?;
-    let index_bytes = fs::read(&a.index).with_context(|| format!("{}", a.index.display()))?;
-    let prefix_bytes = fs::read(&a.prefix).with_context(|| format!("{}", a.prefix.display()))?;
-    let rows_bytes = fs::read(&a.rows).with_context(|| format!("{}", a.rows.display()))?;
+    /// The borrowed view run_pass, sweep, and explain consume.
+    pub(crate) fn ctx(&mut self) -> EvalCtx<'_> {
+        EvalCtx {
+            engine: &mut self.engine,
+            meta_bytes: &self.meta_bytes,
+            index_bytes: &self.index_bytes,
+            rows_bytes: &self.rows_bytes,
+        }
+    }
 
-    let mut engine = Engine::new(&meta_bytes, &index_bytes).map_err(|e| anyhow::anyhow!("{e}"))?;
-    // Start from what the engine derived, not from Default: min_cos
-    // scales with dimensionality and the BM25F weights come from
-    // index.bin, neither of which Default knows. Starting from Default
-    // would silently reset the floor to its 256-dim value and the
-    // weights to the compiled-in constants on any run that passes only
-    // --chunk-penalty.
-    let opts = args.scoring.apply(engine.score_opts());
-    engine.set_score_opts(opts);
-    println!("scoring:   {}", args.scoring.describe(&opts));
-    engine
-        .ingest(0, &prefix_bytes)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    /// Read access for the pre-walk tripwires (verify_expectations,
+    /// corpus header) that must not hold the mutable view yet.
+    pub(crate) fn engine(&self) -> &Engine {
+        &self.engine
+    }
+}
 
-    // An `expect` URL that isn't in the corpus can never pass, and it
-    // reads as a ranking failure rather than a typo. Fail loudly instead:
-    // this exact class of bug — URLs that shifted under the index — once
-    // looked like a total recall collapse for an entire run.
+/// The unknown-URL tripwire, extracted verbatim from eval(). Calibrate
+/// runs it on the gate file AND the collateral file — a typo'd
+/// expectation in known-failures would read as a phantom casualty.
+pub(crate) fn verify_expectations(engine: &Engine, cases: &[Case]) -> Result<()> {
     let known: std::collections::HashSet<&str> = (0..engine.doc_count() as u16)
         .filter_map(|id| engine.doc_url(id))
         .collect();
     let mut unknown: Vec<String> = Vec::new();
-    for case in &cases {
+    for case in cases {
         for url in &case.expect {
             if !known.contains(url.as_str()) {
                 unknown.push(format!("  {:?} expects {url}", case.q));
@@ -275,11 +330,33 @@ pub fn eval(artifacts: &Path, queries: &Path, args: &EvalArgs) -> Result<()> {
             unknown.len()
         );
     }
+    Ok(())
+}
+
+pub fn eval(artifacts: &Path, queries: &Path, args: &EvalArgs) -> Result<()> {
+    let cases = load_cases(queries, args.kind_filter.as_deref())?;
+    if cases.is_empty() {
+        bail!("no cases matched (check --kind)");
+    }
+
+    // ---- Artifacts, exactly as the worker fetches them -----------------
+    // One loader for eval and calibrate, so the two commands cannot load
+    // different engines; the no-Default rationale (min_cos scales with
+    // dimensionality, weights ride in index.bin) lives on LoadedCtx::load.
+    let (mut loaded, opts) = LoadedCtx::load(artifacts, &args.scoring)?;
+    println!("scoring:   {}", args.scoring.describe(&opts));
+
+    // An `expect` URL that isn't in the corpus can never pass, and it
+    // reads as a ranking failure rather than a typo. Fail loudly instead:
+    // this exact class of bug — URLs that shifted under the index — once
+    // looked like a total recall collapse for an entire run.
+    verify_expectations(loaded.engine(), &cases)?;
+
     println!(
         "corpus:  {} docs, {} rows, prefix {} rows",
-        engine.doc_count(),
-        engine.n_rows(),
-        engine.prefix_rows()
+        loaded.engine().doc_count(),
+        loaded.engine().n_rows(),
+        loaded.engine().prefix_rows()
     );
     println!(
         "cases:   {} {}\n",
@@ -289,12 +366,7 @@ pub fn eval(artifacts: &Path, queries: &Path, args: &EvalArgs) -> Result<()> {
             .map_or(String::new(), |k| format!("(kind = {k})"))
     );
 
-    let mut ctx = EvalCtx {
-        engine: &mut engine,
-        meta_bytes: &meta_bytes,
-        index_bytes: &index_bytes,
-        rows_bytes: &rows_bytes,
-    };
+    let mut ctx = loaded.ctx();
 
     if !args.sweep_rrf_k.is_empty() || !args.sweep_rrf_alpha.is_empty() {
         if args.fail_under > 0.0 {
@@ -353,7 +425,7 @@ fn judge(expect: &[String], urls: &[String]) -> (bool, bool) {
 /// Run every case through the engine over the real byte path, under
 /// whatever ScoreOpts the engine currently holds. Verbose prints the
 /// per-case PASS/top3/FAIL lines; sweep mode runs quiet.
-fn run_pass(ctx: &mut EvalCtx, cases: &[Case], verbose: bool) -> Result<Pass> {
+pub(crate) fn run_pass(ctx: &mut EvalCtx, cases: &[Case], verbose: bool) -> Result<Pass> {
     let mut pass = Pass::default();
 
     for case in cases {
@@ -397,6 +469,13 @@ fn run_pass(ctx: &mut EvalCtx, cases: &[Case], verbose: bool) -> Result<Pass> {
             t.hit3 += 1;
             pass.overall.hit3 += 1;
         }
+
+        pass.outcomes.push(CaseOutcome {
+            kind: case.kind.clone(),
+            q: case.q.clone(),
+            hit1,
+            hit3,
+        });
 
         if verbose {
             let (mark, style) = if hit1 {
@@ -603,12 +682,12 @@ fn print_failures(pass: &Pass, hint: bool) {
 fn print_explains(ctx: &mut EvalCtx, pass: &Pass) -> Result<()> {
     for (kind, q, _) in &pass.failures {
         anstream::println!("\n{HEADING}──── explain [{kind}] {q:?} ────{HEADING:#}");
-        crate::explain::print_report(ctx.engine, ctx.meta_bytes, ctx.index_bytes, q, 5)?;
+        ctx.explain(q, 5)?;
     }
     Ok(())
 }
 
-fn pct(hit: usize, n: usize) -> f32 {
+pub(crate) fn pct(hit: usize, n: usize) -> f32 {
     if n == 0 {
         0.0
     } else {
@@ -626,7 +705,7 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-fn load_cases(path: &Path, kind_filter: Option<&str>) -> Result<Vec<Case>> {
+pub(crate) fn load_cases(path: &Path, kind_filter: Option<&str>) -> Result<Vec<Case>> {
     let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     parse_cases(&text, kind_filter).with_context(|| format!("in {}", path.display()))
 }
