@@ -471,6 +471,102 @@ and the best cell is re-run for its per-kind breakdown and failures.")]
         #[arg(long)]
         explain: bool,
     },
+    /// Walk each scoring knob against the gate fixtures; report
+    /// plateaus, cliffs, and casualty-checked candidates.
+    #[command(long_about = "\
+Sweeps every scoring knob one at a time against the gate query set and \
+prints, per knob, the recall table with per-case flips against the \
+baseline, the plateau around the current value, and any candidate worth \
+reviewing.
+ 
+Suggestions are nominations, never edits: a candidate is named with its \
+gained and lost cases and its flips in the known-failures fixture, and \
+this command never writes chops-search.toml. Expect `keep` on nearly \
+every knob — that is the calibration holding, not the tool failing.
+ 
+Joint effects stay in `eval --sweep-rrf-k --sweep-rrf-alpha`; a \
+candidate on either fusion knob here is a pointer at that grid, not a \
+value to pin from a 1-D table.")]
+    Calibrate {
+        /// Artifacts directory. Default: `out` from chops-search.toml.
+        #[arg(long, value_name = "DIR")]
+        artifacts: Option<PathBuf>,
+        /// Gate query set. Default: fixtures/queries.toml beside the
+        /// config.
+        ///
+        /// Deliberately NOT a merged all-fixtures file: calibrating
+        /// against disputed known-failures verdicts is co-adaptation
+        /// with extra steps.
+        #[arg(long, value_name = "FILE")]
+        queries: Option<PathBuf>,
+        /// Collateral set for casualty checks on candidates. Default:
+        /// fixtures/known-failures.toml beside the config, when present.
+        ///
+        /// Every candidate re-runs against this file and names what it
+        /// breaks or rehabilitates there — the check the 0.34 floor
+        /// never got.
+        #[arg(long, value_name = "FILE")]
+        collateral: Option<PathBuf>,
+        /// Knob to walk (repeatable). Default: all of them.
+        ///
+        /// Known: min_gap, rrf_alpha, rrf_k, kw_floor, chunk_penalty,
+        /// w_title, w_tag, w_desc, min_cos.
+        #[arg(long = "knob", value_name = "NAME")]
+        knobs: Vec<String>,
+        /// Explicit comma-separated axis, e.g. 0.27,0.28,0.29.
+        ///
+        /// Requires exactly one --knob; an explicit axis applied to
+        /// several knobs at once is how a min_gap value ends up swept
+        /// over a weight scale. The current value is spliced in as an
+        /// anchor cell (marked >) so the plateau always has something
+        /// to be measured around, so a three-value list shows four rows.
+        #[arg(long, value_name = "LIST", value_delimiter = ',')]
+        values: Vec<f32>,
+        /// Print inline explains for every case a candidate flips, on
+        /// the engine holding the candidate's opts — the state no
+        /// standalone `query` invocation can reproduce.
+        #[arg(long)]
+        explain: bool,
+        // ---- fixed base under the walk, same flags as eval ----
+        /// Relevance-floor base. Default: the index.bin override, or
+        /// derived from dimensionality when none was baked.
+        #[arg(long, value_name = "COS")]
+        min_cos: Option<f32>,
+        /// Chunk-count correction base. Default: whatever index.bin was
+        /// built with.
+        #[arg(long, value_name = "COEFF")]
+        chunk_penalty: Option<f32>,
+        /// Keyword evidence gate base. Default 0.30.
+        #[arg(long, value_name = "FRACTION")]
+        kw_floor: Option<f32>,
+        /// Corroboration gate base. Default: whatever index.bin was
+        /// built with.
+        #[arg(long, value_name = "GAP")]
+        min_gap: Option<f32>,
+        /// Gate escape hatch base. Default off. Disables at infinity,
+        /// not at 0 — 0 would disable the gate, not the hatch.
+        #[arg(long, value_name = "COS")]
+        strong_cos: Option<f32>,
+        /// BM25F title weight base. Default: whatever index.bin was
+        /// built with.
+        #[arg(long, value_name = "WEIGHT")]
+        w_title: Option<f32>,
+        /// BM25F tag weight base. Default: whatever index.bin was built
+        /// with.
+        #[arg(long, value_name = "WEIGHT")]
+        w_tag: Option<f32>,
+        /// BM25F description weight base. Default: whatever index.bin
+        /// was built with.
+        #[arg(long, value_name = "WEIGHT")]
+        w_desc: Option<f32>,
+        /// Fusion weighting base. Default: whatever index.bin was built
+        /// with.
+        #[arg(long, value_name = "ALPHA")]
+        rrf_alpha: Option<f32>,
+        /// RRF rank discount base. Default 60.
+        #[arg(long, value_name = "K")]
+        rrf_k: Option<f32>,
+    },
 
     /// Emit a shell completion script.
     #[command(long_about = "\
@@ -632,6 +728,71 @@ fn main() -> Result<()> {
             };
             chops_search::init::init(&root, !no_page)
         }
+        Cmd::Calibrate {
+            artifacts,
+            queries,
+            collateral,
+            knobs,
+            values,
+            explain,
+            min_cos,
+            chunk_penalty,
+            kw_floor,
+            min_gap,
+            strong_cos,
+            w_title,
+            w_tag,
+            w_desc,
+            rrf_alpha,
+            rrf_k,
+        } => {
+            let cfg = load_config(&site)?;
+            let dir = artifacts.unwrap_or_else(|| cfg.out.clone());
+            let queries = queries.unwrap_or_else(|| cfg.root.join("fixtures/queries.toml"));
+            // Discovered, not required: a missing known-failures file is
+            // a legitimate state, and calibrate says candidates went
+            // casualty-unchecked rather than failing.
+            let collateral = collateral.or_else(|| {
+                let p = cfg.root.join("fixtures/known-failures.toml");
+                p.exists().then_some(p)
+            });
+            let mut parsed = Vec::new();
+            for name in &knobs {
+                parsed.push(chops_search::knob::Knob::from_name(name).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "unknown knob `{name}` (known: {})",
+                        chops_search::knob::Knob::ALL
+                            .iter()
+                            .map(|k| k.name())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                })?);
+            }
+            chops_search::calibrate::calibrate(
+                &dir,
+                &queries,
+                chops_search::calibrate::CalibrateArgs {
+                    knobs: parsed,
+                    values,
+                    collateral,
+                    explain,
+                    score: chops_search::eval::ScoreArgs {
+                        min_cos,
+                        chunk_penalty,
+                        kw_floor,
+                        min_gap,
+                        strong_cos,
+                        w_title,
+                        w_tag,
+                        w_desc,
+                        rrf_alpha,
+                        rrf_k,
+                    },
+                },
+            )
+        }
+
         Cmd::Completions { shell } => {
             completion::generate(shell, &mut Cli::command());
             eprintln!("{}", completion::install_hint(shell));
