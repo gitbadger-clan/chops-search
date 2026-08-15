@@ -52,17 +52,17 @@ dims = 128
 # chunk_chars = 600
 # prefix_rows = 2048
 
-# Scoring calibration. Unlike the weights above, these three are baked
-# into index.bin at build time and read by the engine at construction,
-# so the value committed here is the value every visitor's browser runs
+# Scoring calibration. Unlike the weights above, these are baked into
+# index.bin at build time and read by the engine at construction, so
+# the value committed here is the value every visitor's browser runs
 # — and a bare `chops-search eval` measures the same configuration.
 #
 # They ship commented out because they are CALIBRATED, not chosen: a
 # value that helps one corpus hurts another, and uncommenting an example
 # without measuring is shipping someone else's calibration. The loop is:
 # sweep with `chops-search eval` against a labeled fixture set, verify
-# the mechanism with `chops-search query --explain`, then pin the
-# winning value here and rebuild.
+# the mechanism with the explain output, then pin the winning value
+# here with a dated comment saying what was measured, and rebuild.
 #
 # min_gap: the corroboration gate. When a query has no keyword evidence
 # and no document stands out from the pack by at least this much (best
@@ -79,6 +79,14 @@ dims = 128
 # 0 is plain RRF, the compiled default.
 # Sweep: chops-search eval --rrf-alpha
 # rrf_alpha = 1.0
+#
+# chunk_penalty: expected-max correction. A document's semantic score is
+# its BEST chunk's cosine, so many-chunk documents hold more lottery
+# tickets; this subtracts coeff × sqrt(2 ln chunks) to offset that bias.
+# Matters only when chunk counts vary widely across the corpus. The
+# compiled default is 0.02.
+# Sweep: chops-search eval --chunk-penalty
+# chunk_penalty = 0.05
 #
 # min_cos: the semantic relevance floor, as an OVERRIDE. Leave this
 # commented and the engine derives the floor from `dims`, which is right
@@ -290,9 +298,11 @@ mod tests {
         assert_eq!(cfg.min_gap, 0.0, "scaffold must not arm the gate");
         assert_eq!(cfg.rrf_alpha, 0.0, "scaffold must fuse as plain RRF");
         assert_eq!(cfg.min_cos, None, "scaffold must derive the floor");
-        // The one deliberate live value: dims is scaffolded explicit so
-        // the size-vs-recall decision is visible in the diff, against a
-        // compiled default of native size.
+        assert_eq!(
+            cfg.chunk_penalty,
+            chops_search_core::score::ScoreOpts::default().chunk_penalty,
+            "scaffold must ship the compiled penalty"
+        );
         assert_eq!(cfg.dims, Some(128));
     }
 
@@ -304,14 +314,14 @@ mod tests {
         // here instead of in some user's build.
         let live = uncommented(CONFIG);
         let cfg = Config::parse(&live, root()).expect("uncommented scaffold must parse");
-        // And the uncommenting actually reached the parser — guards the
-        // helper against silently matching nothing.
         assert_eq!(cfg.min_gap, 0.08);
         assert_eq!(cfg.rrf_alpha, 1.0);
+        assert_eq!(cfg.chunk_penalty, 0.05);
         assert_eq!(cfg.min_cos, Some(0.34));
         assert_eq!(cfg.title_weight, 2.0);
         assert_eq!(cfg.chunk_chars, 600);
     }
+
     #[test]
     fn creates_config_and_page() {
         let root = tmp("create");

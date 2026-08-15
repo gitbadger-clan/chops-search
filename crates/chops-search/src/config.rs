@@ -65,6 +65,7 @@ const KNOWN_KEYS: &[&str] = &[
     "min_gap",
     "rrf_alpha",
     "min_cos",
+    "chunk_penalty",
 ];
 
 #[derive(Debug, Clone)]
@@ -96,6 +97,13 @@ pub struct Config {
     /// right answer for almost every corpus — an explicit value pins
     /// the floor across dims changes, and an explicit 0.0 disables it.
     pub min_cos: Option<f32>,
+
+    /// Per-chunk expected-max correction, baked into index.bin. A doc's
+    /// best-of-n chunk cosine is biased upward by having more lottery
+    /// tickets; this subtracts coeff × sqrt(2 ln n) in cosine units.
+    /// Default is the compiled constant. Calibrate before changing:
+    /// `chops-search calibrate` or `eval --chunk-penalty`.
+    pub chunk_penalty: f32,
 }
 
 impl Config {
@@ -118,6 +126,7 @@ impl Config {
             min_gap: 0.0,
             rrf_alpha: 0.0,
             min_cos: None,
+            chunk_penalty: chops_search_core::score::ScoreOpts::default().chunk_penalty,
             root,
         }
     }
@@ -224,7 +233,7 @@ impl Config {
         // The checks live in helpers because the build FLAGS must reject
         // exactly what the file keys reject — two validators drift.
         if let Some(v) = doc.get("min_gap") {
-            cfg.min_gap = check_cosine("min_gap", as_f32(v, "min_gap")?)?;
+            cfg.min_gap = check_cosine("min_gap", "cosine-space value", as_f32(v, "min_gap")?)?;
         }
         if let Some(v) = doc.get("rrf_alpha") {
             cfg.rrf_alpha = check_alpha(as_f32(v, "rrf_alpha")?)?;
@@ -232,7 +241,19 @@ impl Config {
         if let Some(v) = doc.get("min_cos") {
             // 0.0 is a real override ("floor off"), which is exactly why
             // this field is Option and why absence must stay None.
-            cfg.min_cos = Some(check_cosine("min_cos", as_f32(v, "min_cos")?)?);
+            cfg.min_cos = Some(check_cosine(
+                "min_cos",
+                "min cosine",
+                as_f32(v, "min_cos")?,
+            )?);
+        }
+
+        if let Some(v) = doc.get("chunk_penalty") {
+            cfg.chunk_penalty = check_cosine(
+                "chunk_penalty",
+                "coefficient in cosine units",
+                as_f32(v, "chunk_penalty")?,
+            )?;
         }
 
         Ok(cfg)
@@ -294,7 +315,7 @@ impl Config {
     /// value the config parser would have rejected.
     pub fn with_scoring(mut self, flags: ScoringFlags) -> Result<Self> {
         if let Some(g) = flags.min_gap {
-            self.min_gap = check_cosine("--min-gap", g)?;
+            self.min_gap = check_cosine("--min-gap", "cosine-space value", g)?;
         }
         if let Some(a) = flags.rrf_alpha {
             self.rrf_alpha = check_alpha(a)?;
@@ -304,7 +325,11 @@ impl Config {
             // as the file key; there is no flag spelling for "un-set an
             // override the file made" because nothing needs it — omit
             // both and the floor derives.
-            self.min_cos = Some(check_cosine("--min-cos", c)?);
+            self.min_cos = Some(check_cosine("--min-cos", "min cosine value", c)?);
+        }
+
+        if let Some(c) = flags.chunk_penalty {
+            self.chunk_penalty = check_cosine("--chunk-penalty", "coefficient in cosine units", c)?;
         }
         Ok(self)
     }
@@ -319,13 +344,17 @@ pub struct ScoringFlags {
     pub min_gap: Option<f32>,
     pub rrf_alpha: Option<f32>,
     pub min_cos: Option<f32>,
+    pub chunk_penalty: Option<f32>,
 }
 
-/// Range rails shared by the file keys and the build flags. `key` is
-/// only for the error message.
-fn check_cosine(key: &str, v: f32) -> Result<f32> {
+/// Range rail shared by file keys and build flags — one validator so a
+/// flag can never bake what a key would refuse. `key` and `what` are
+/// only for the message: min_gap/min_cos are cosine-space values,
+/// chunk_penalty is a coefficient in cosine units; same range, different
+/// noun, and the message shouldn't misdescribe the quantity.
+fn check_cosine(key: &str, what: &str, v: f32) -> Result<f32> {
     if !v.is_finite() || !(0.0..=1.0).contains(&v) {
-        bail!("{key} must be a cosine-space value in 0..=1, got {v}");
+        bail!("{key} must be a {what} in 0..=1, got {v}");
     }
     Ok(v)
 }

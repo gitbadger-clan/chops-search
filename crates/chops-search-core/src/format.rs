@@ -42,6 +42,11 @@
 //!       override ride next to the weights, same provenance argument —
 //!       a value calibrated against a corpus travels with the corpus,
 //!       and index.bin is the only way the browser learns it
+//!   v6  chunk_penalty joins the calibration block (between rrf_alpha
+//!       and the min_cos flag) — same provenance argument; bumped even
+//!       though v5 never shipped externally, because a stale local
+//!       binary meeting an extended file mid-development is exactly the
+//!       plausible-garbage parse the version check exists to refuse
 //!
 //! model.meta.bin is at version 2: the v5 batch rewrote its header too
 //! (new magic, u32 version field, header field order), so it bumped in
@@ -65,7 +70,7 @@ use crate::keyword::{FieldWeights, KeywordIndex};
 
 /// index.bin magic + version.
 pub const INDEX_MAGIC: &[u8; 4] = b"CSIX";
-pub const INDEX_VERSION: u32 = 5;
+pub const INDEX_VERSION: u32 = 6;
 
 /// model.meta.bin magic + version.
 pub const META_MAGIC: &[u8; 4] = b"CSMM";
@@ -134,6 +139,8 @@ pub struct Index {
     /// term → postings, terms sorted, postings by ascending doc id.
     /// A Vec of pairs rather than a map so the artifact is byte-stable.
     pub terms: Vec<(String, Vec<Posting>)>,
+
+    pub chunk_penalty: f32,
 }
 
 // ---------------------------------------------------------------------
@@ -245,6 +252,7 @@ impl Index {
         // v5: scoring calibration, same provenance as the weights.
         w.f32(self.min_gap);
         w.f32(self.rrf_alpha);
+        w.f32(self.chunk_penalty);
         // Presence flag + fixed-width value; the absent case writes 0.0
         // so there is exactly one byte representation of "derive".
         match self.min_cos {
@@ -331,6 +339,8 @@ impl Index {
         check_cosine(min_gap, "min_gap out of range (0..=1)")?;
         let rrf_alpha = r.f32()?;
         check_alpha(rrf_alpha)?;
+        let chunk_penalty = r.f32()?;
+        check_cosine(chunk_penalty, "chunk_penalty out of range (0..=1)")?;
         let min_cos = match r.u8()? {
             0 => {
                 // The value slot is fixed-width; consume and discard.
@@ -403,6 +413,7 @@ impl Index {
             chunk_doc,
             chunk_vecs,
             terms,
+            chunk_penalty,
         })
     }
 
@@ -434,6 +445,7 @@ mod tests {
             },
             min_gap: 0.08,
             rrf_alpha: 1.0,
+            chunk_penalty: 0.02,
             min_cos,
             docs: vec![
                 Doc {
@@ -575,6 +587,12 @@ mod tests {
             let mut idx = sample_index(None);
             idx.min_cos = Some(bad);
             assert!(Index::read(&idx.write()).is_err(), "min_cos {bad} accepted");
+            let mut idx = sample_index(None);
+            idx.chunk_penalty = bad;
+            assert!(
+                Index::read(&idx.write()).is_err(),
+                "chunk_penalty {bad} accepted"
+            );
         }
         for bad in [f32::NAN, -1.0, 1e6] {
             let mut idx = sample_index(None);

@@ -94,6 +94,7 @@ fn build_artifacts_with(weights: FieldWeights) -> (Vec<u8>, Vec<u8>, Vec<u8>, Ve
         // these on a read-back Index.
         min_gap: 0.0,
         rrf_alpha: 0.0,
+        chunk_penalty: 0.0,
         min_cos: None,
         docs: vec![
             Doc {

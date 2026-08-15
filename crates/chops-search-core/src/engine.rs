@@ -149,6 +149,7 @@ impl Engine {
         let min_gap = index.min_gap;
         let rrf_alpha = index.rrf_alpha;
         let min_cos_override = index.min_cos;
+        let chunk_penalty = index.chunk_penalty;
         Ok(Engine {
             vocab,
             store,
@@ -182,6 +183,7 @@ impl Engine {
                 min_gap,
                 rrf_alpha,
                 weights,
+                chunk_penalty,
                 ..Default::default()
             },
         })

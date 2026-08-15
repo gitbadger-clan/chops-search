@@ -30,7 +30,7 @@ use sha2::{Digest, Sha256};
 
 use chops_search::assets;
 use chops_search::completion;
-use chops_search::config::{Config, ScoringFlags};
+use chops_search::config::Config;
 use chops_search::frontmatter::{self, FrontMatter};
 use chops_search::model_loader::load_model2vec;
 use chops_search::pca::pca_reduce;
@@ -158,21 +158,16 @@ repo moved or went down.")]
 
     /// Build search artifacts and the browser runtime.
     #[command(long_about = "\
-Reads the content tree and the model, writes hashed artifacts plus the \
-wasm engine, worker, page script, and stylesheet into the output \
-directory.
+Build the search artifacts: model.meta.bin (vocabulary and scales), \
+model.rows.bin (the embedding matrix, range-fetched at query time), and \
+index.bin (chunk vectors, documents, keyword postings).
 
-Content changes touch only index.bin and snippets.bin. The model files \
-change when the model does, and the wasm caches across every deploy.
-
-The BM25F field weights from chops-search.toml are written into \
-index.bin, so the browser scores with what the site configured. Sweep \
-them with `eval --w-title` / `--w-tag` against a built index; only the \
-committed value needs a rebuild. 
-
-The scoring calibration (`min_gap`, `rrf_alpha`, `min_cos`) from \
-chops-search.toml is baked in the same way; the build log's `scoring:` \
-line states what shipped.")]
+The BM25F field weights from chops-search.toml are baked into index.bin, \
+so the browser ranks with the weights the corpus was built with; the \
+eval/query flags exist for sweeping candidates, and only the committed \
+value needs a rebuild. The scoring calibration (`min_gap`, `rrf_alpha`, \
+`chunk_penalty`, `min_cos`) is baked in the same way; the build log's \
+`scoring:` line states what shipped.")]
     Build {
         /// Content directory. Default: `content` from chops-search.toml.
         #[arg(long, value_name = "DIR")]
@@ -219,6 +214,11 @@ line states what shipped.")]
         /// default 0 (plain RRF).
         #[arg(long, value_name = "ALPHA")]
         rrf_alpha: Option<f32>,
+        /// Per-chunk expected-max correction to bake into index.bin.
+        /// Overrides the `chunk_penalty` key. Same rails as the file
+        /// key.
+        #[arg(long, value_name = "COEFF")]
+        chunk_penalty: Option<f32>,
         /// Relevance-floor override to bake into index.bin.
         ///
         /// Overrides `min_cos` from chops-search.toml. When neither is
@@ -401,10 +401,11 @@ and the best cell is re-run for its per-kind breakdown and failures.")]
         /// their keep.
         #[arg(long, value_name = "WEIGHT")]
         w_desc: Option<f32>,
-        /// Coefficient on the chunk-count correction. Default 0.02.
-        ///
-        /// For sweeping. Longer documents get more chances at a high
-        /// max-pooled score; this corrects the bias. 0 disables it.
+        /// Per-chunk expected-max correction: subtracts coeff ×
+        /// sqrt(2 ln n) from a doc's best-chunk cosine, offsetting the
+        /// lottery-ticket advantage of many-chunk documents. Default:
+        /// whatever index.bin was built with (the compiled 0.02 on an
+        /// uncalibrated corpus).
         #[arg(long, value_name = "COEFF")]
         chunk_penalty: Option<f32>,
         /// Minimum top-median cosine contrast for an uncorroborated
@@ -508,21 +509,23 @@ fn main() -> Result<()> {
     match cli.cmd {
         Cmd::Build {
             content,
-            model,
             out,
-            prefix_rows,
-            chunk_chars,
+            model,
             dims,
-            no_runtime,
+            chunk_chars,
+            prefix_rows,
             min_gap,
             rrf_alpha,
+            chunk_penalty,
             min_cos,
+            no_runtime,
         } => {
             let cfg = load_config(&site)?
                 .with_overrides(content, out, model, dims, chunk_chars, prefix_rows)
-                .with_scoring(ScoringFlags {
+                .with_scoring(chops_search::config::ScoringFlags {
                     min_gap,
                     rrf_alpha,
+                    chunk_penalty,
                     min_cos,
                 })?;
             eprintln!(
@@ -936,6 +939,7 @@ fn build(cfg: &Config, runtime: bool) -> Result<()> {
         // explicit 0.0 is the different, meaningful claim "floor off".
         min_gap: cfg.min_gap,
         rrf_alpha: cfg.rrf_alpha,
+        chunk_penalty: cfg.chunk_penalty,
         min_cos: cfg.min_cos,
         docs,
         chunk_doc,
