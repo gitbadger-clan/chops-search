@@ -55,6 +55,9 @@ sha2 = "0.11"
 # blocking, no async runtime, rustls rather than a system OpenSSL.
 ureq = "3"
 
+anstream = "1"
+anstyle = "1"
+
 [dev-dependencies]
 # Official MinishLab implementation, used ONLY as a parity oracle in
 # tests/model2vec_parity.rs — never as the production embedding path.

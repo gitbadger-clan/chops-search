@@ -26,10 +26,17 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
+use anstyle::{AnsiColor, Style};
 use anyhow::{Context, Result, bail};
 use chops_search_core::engine::Engine;
 use chops_search_core::score::ScoreOpts;
 
+// Color renders only on a tty (anstream strips otherwise), so the
+// transcripts the sweep protocol diffs and greps stay byte-plain.
+const GREEN: Style = AnsiColor::Green.on_default();
+const YELLOW: Style = AnsiColor::Yellow.on_default();
+const RED: Style = AnsiColor::Red.on_default().bold();
+const HEADING: Style = Style::new().bold();
 struct Case {
     q: String,
     expect: Vec<String>,
@@ -309,6 +316,11 @@ pub fn eval(artifacts: &Path, queries: &Path, args: &EvalArgs) -> Result<()> {
     print_failures(&pass, !args.explain);
     if args.explain {
         print_explains(&mut ctx, &pass)?;
+        // The explains bury the numbers under pages of evidence;
+        // restate the verdict so the last screen of the transcript is
+        // the summary, not doc 12's cosine.
+        anstream::println!("\n{HEADING}──── totals ────{HEADING:#}");
+        print_summary(&pass);
     }
 
     let score = pct(pass.overall.hit1, pass.overall.n) / 100.0;
@@ -387,15 +399,15 @@ fn run_pass(ctx: &mut EvalCtx, cases: &[Case], verbose: bool) -> Result<Pass> {
         }
 
         if verbose {
-            let mark = if hit1 {
-                "PASS"
+            let (mark, style) = if hit1 {
+                ("PASS", GREEN)
             } else if hit3 {
-                "top3"
+                ("top3", YELLOW)
             } else {
-                "FAIL"
+                ("FAIL", RED)
             };
-            println!(
-                "{mark}  {:<13} {:<44} {}  [{}]",
+            anstream::println!(
+                "{style}{mark}{style:#}  {:<13} {:<44} {}  [{}]",
                 case.kind,
                 truncate(&case.q, 44),
                 urls.first().map_or("(no results)", String::as_str),
@@ -498,6 +510,14 @@ fn sweep(
         // The engine holds the best cell's opts right now — the state
         // no standalone command can reproduce.
         print_explains(ctx, &p)?;
+        anstream::println!(
+            "{HEADING}{:<14} {:>4} {:>9.0}% {:>9.0}%{HEADING:#}",
+            "OVERALL",
+            p.overall.n,
+            pct(p.overall.hit1, p.overall.n),
+            pct(p.overall.hit3, p.overall.n)
+        );
+        print_summary(&p);
     }
     println!(
         "\nlock in alpha: set `rrf_alpha = {a}` in chops-search.toml and rebuild — \
@@ -582,7 +602,7 @@ fn print_failures(pass: &Pass, hint: bool) {
 /// the top handful plus the gate and floor lines.
 fn print_explains(ctx: &mut EvalCtx, pass: &Pass) -> Result<()> {
     for (kind, q, _) in &pass.failures {
-        println!("\n──── explain [{kind}] {q:?} ────");
+        anstream::println!("\n{HEADING}──── explain [{kind}] {q:?} ────{HEADING:#}");
         crate::explain::print_report(ctx.engine, ctx.meta_bytes, ctx.index_bytes, q, 5)?;
     }
     Ok(())
