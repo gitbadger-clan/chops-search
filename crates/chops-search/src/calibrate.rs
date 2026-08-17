@@ -33,6 +33,8 @@
 //! candidate: recall@3 movement is evidence worth naming, not a headline
 //! worth acting on. One knob moves at a time and
 //! the base is restored between knobs; the coupled rrf_k × rrf_alpha
+//! pair keeps its joint grid in `eval --sweep-rrf-k --sweep-rrf-alpha`,
+//! and a candidate on either half here is a pointer at that grid.
 //!
 //! Cost: the baseline passes warm every row both fixture sets need
 //! (plan() returns empty once a row is resident), so a full walk is one
@@ -41,12 +43,14 @@
 
 use std::path::{Path, PathBuf};
 
+use anstyle::Style;
 use anyhow::{Context, Result, bail};
 
 use crate::eval::{
     Case, CaseOutcome, LoadedCtx, Pass, ScoreArgs, load_cases, pct, run_pass, verify_expectations,
 };
 use crate::knob::Knob;
+use crate::transcript::{GREEN, HEADING, NOTE, RED, Transcript, YELLOW};
 
 /// Smallest net recall@1 gain that earns a REVIEW nomination. See the
 /// module header for why +1 is below instrument resolution.
@@ -67,12 +71,29 @@ pub struct CalibrateArgs {
     /// Print inline explains for every case a candidate flips, while
     /// the engine holds the candidate's opts.
     pub explain: bool,
+    /// Also save the transcript here (`-O`). The saved copy is prefixed
+    /// with the command line, so it states its own provenance.
+    pub output: Option<PathBuf>,
+    /// Also push the transcript to the system clipboard.
+    pub clipboard: bool,
     /// Fixed base under the walk, same flags as `eval`. Every cell of
     /// every knob starts from this base with exactly one field changed.
     pub score: ScoreArgs,
 }
 
 pub fn calibrate(artifacts: &Path, queries: &Path, args: CalibrateArgs) -> Result<()> {
+    let mut out = Transcript::new(args.output.as_deref(), args.clipboard);
+    let outcome = walk(artifacts, queries, &args, &mut out);
+    out.finish(&outcome)?;
+    outcome
+}
+
+fn walk(
+    artifacts: &Path,
+    queries: &Path,
+    args: &CalibrateArgs,
+    out: &mut Transcript,
+) -> Result<()> {
     let knobs: Vec<Knob> = if args.knobs.is_empty() {
         Knob::ALL.to_vec()
     } else {
@@ -98,14 +119,18 @@ pub fn calibrate(artifacts: &Path, queries: &Path, args: CalibrateArgs) -> Resul
     // and the gate walk must judge the same bytes, and the borrowed ctx
     // is how run_pass and explain stay on eval's exact path.
     let (mut loaded, base_opts) = LoadedCtx::load(artifacts, &args.score)?;
-    println!("scoring:   {}", args.score.describe(&base_opts));
+    out.line(format!("scoring:   {}", args.score.describe(&base_opts)));
     verify_expectations(loaded.engine(), &cases)?;
     if let Some((_, c)) = &coll_cases {
         // A typo'd expectation in known-failures would read as a
         // phantom casualty, so the tripwire covers both files.
         verify_expectations(loaded.engine(), c)?;
     }
-    println!("gate:    {} ({} cases)", queries.display(), cases.len());
+    out.line(format!(
+        "gate:    {} ({} cases)",
+        queries.display(),
+        cases.len()
+    ));
 
     let mut ctx = loaded.ctx();
 
@@ -113,26 +138,26 @@ pub fn calibrate(artifacts: &Path, queries: &Path, args: CalibrateArgs) -> Resul
     // else; doing it first also warms its rows before any cell runs.
     let collateral: Option<(Vec<Case>, Pass)> = match coll_cases {
         Some((p, c)) => {
-            println!("collateral: {} ({} cases)", p.display(), c.len());
+            out.line(format!("collateral: {} ({} cases)", p.display(), c.len()));
             ctx.engine.set_score_opts(base_opts);
             let cpass = run_pass(&mut ctx, &c, false)?;
             Some((c, cpass))
         }
         None => {
-            println!("collateral: none — candidates below are casualty-UNCHECKED");
+            out.line("collateral: none — candidates below are casualty-UNCHECKED");
             None
         }
     };
 
     ctx.engine.set_score_opts(base_opts);
     let baseline = run_pass(&mut ctx, &cases, false)?;
-    println!(
+    out.line(format!(
         "baseline: recall@1 {:.0}% ({}/{}), recall@3 {:.0}%\n",
         pct(baseline.overall.hit1, baseline.overall.n),
         baseline.overall.hit1,
         baseline.overall.n,
         pct(baseline.overall.hit3, baseline.overall.n),
-    );
+    ));
 
     let mut suggestions: Vec<String> = Vec::new();
 
@@ -169,25 +194,27 @@ pub fn calibrate(artifacts: &Path, queries: &Path, args: CalibrateArgs) -> Resul
             Some(k) => format!("config key `{k}`"),
             None => "no config key".to_string(),
         };
-        println!(
-            "──── {} (current {}, {}) ────",
+        out.line(format!(
+            "{HEADING}──── {} (current {}, {}) ────{HEADING:#}",
             knob.name(),
             fv(current),
             key
-        );
-        print!(
-            "{}",
-            knob_table(&cells, cur_idx, baseline.overall.n, &baseline.outcomes)
-        );
+        ));
+        out.raw(knob_table(
+            &cells,
+            cur_idx,
+            baseline.overall.n,
+            &baseline.outcomes,
+        ));
 
         // Instrument tripwire: the cell at the current value re-runs the
         // baseline configuration, so any flip there is nondeterminism in
         // the instrument, not a finding.
         if !cells[cur_idx].flips.inert() {
-            println!(
-                "WARNING: re-running the current value flipped cases — \
-                 nondeterminism in the instrument; distrust this table"
-            );
+            out.line(format!(
+                "{YELLOW}WARNING: re-running the current value flipped cases — \
+                 nondeterminism in the instrument; distrust this table{YELLOW:#}",
+            ));
         }
 
         // Candidates, casualty-checked against the collateral fixture,
@@ -205,23 +232,25 @@ pub fn calibrate(artifacts: &Path, queries: &Path, args: CalibrateArgs) -> Resul
                     let f = diff_outcomes(&cbase.outcomes, &p.outcomes);
                     if args.explain {
                         for &i in &f.lost1 {
-                            println!(
-                                "\n──── explain casualty [{}] {:?} @ {} = {} ────",
+                            out.line(format!(
+                                "\n{HEADING}──── explain casualty [{}] {:?} @ {} = {} ────{HEADING:#}",
                                 cbase.outcomes[i].kind,
                                 cbase.outcomes[i].q,
                                 knob.name(),
                                 fv(cell.value)
-                            );
+                            ));
+                            out.note_uncaptured("explain");
                             ctx.explain(&cbase.outcomes[i].q, 5)?;
                         }
                         for &i in &f.gained1 {
-                            println!(
-                                "\n──── explain rehabilitation [{}] {:?} @ {} = {} ────",
+                            out.line(format!(
+                                "\n{HEADING}──── explain rehabilitation [{}] {:?} @ {} = {} ────{HEADING:#}",
                                 cbase.outcomes[i].kind,
                                 cbase.outcomes[i].q,
                                 knob.name(),
                                 fv(cell.value)
-                            );
+                            ));
+                            out.note_uncaptured("explain");
                             ctx.explain(&cbase.outcomes[i].q, 5)?;
                         }
                     }
@@ -248,13 +277,14 @@ pub fn calibrate(artifacts: &Path, queries: &Path, args: CalibrateArgs) -> Resul
                     } else {
                         "lost"
                     };
-                    println!(
-                        "\n──── explain {dir} [{}] {:?} @ {} = {} ────",
+                    out.line(format!(
+                        "\n{HEADING}──── explain {dir} [{}] {:?} @ {} = {} ────{HEADING:#}",
                         baseline.outcomes[i].kind,
                         baseline.outcomes[i].q,
                         knob.name(),
                         fv(cell.value)
-                    );
+                    ));
+                    out.note_uncaptured("explain");
                     ctx.explain(&baseline.outcomes[i].q, 5)?;
                 }
             }
@@ -280,7 +310,7 @@ pub fn calibrate(artifacts: &Path, queries: &Path, args: CalibrateArgs) -> Resul
 
         let inert: Vec<bool> = cells.iter().map(|c| c.flips.inert()).collect();
         let s = suggestion(knob, &axis, &inert, cur_idx, &reports);
-        println!("{s}\n");
+        out.line(format!("{s}\n"));
         suggestions.push(format!(
             "{:<14} {}",
             knob.name(),
@@ -288,14 +318,14 @@ pub fn calibrate(artifacts: &Path, queries: &Path, args: CalibrateArgs) -> Resul
         ));
     }
 
-    println!("──── suggestions ────");
+    out.line(format!("{HEADING}──── suggestions ────{HEADING:#}"));
     for s in &suggestions {
-        println!("{s}");
+        out.line(s);
     }
-    println!(
+    out.line(
         "\nNothing above was written anywhere. A REVIEW line is a nomination: \
          explain each named flip, then pin the value in chops-search.toml and \
-         rebuild so it ships in index.bin."
+         rebuild so it ships in index.bin.",
     );
     Ok(())
 }
@@ -431,8 +461,8 @@ pub(crate) fn suggestion(
         let current = fv(axis[cur]);
         if inert.iter().all(|&b| b) {
             return format!(
-                "keep {current} — flat across the whole axis; the knob is inert \
-                 on these cases at this base"
+                "{GREEN}keep {current}{GREEN:#} — flat across the whole axis; the knob is inert \
+                 on these cases at this base",
             );
         }
         let (lo, hi) = plateau_around(inert, cur);
@@ -447,7 +477,7 @@ pub(crate) fn suggestion(
             format!("cliff above at {}", fv(axis[hi + 1]))
         };
         return format!(
-            "keep {current} (plateau {}–{}; {below}, {above})",
+            "{GREEN}keep {current}{GREEN:#} (plateau {}–{}; {below}, {above})",
             fv(axis[lo]),
             fv(axis[hi]),
         );
@@ -459,7 +489,7 @@ pub(crate) fn suggestion(
             s.push('\n');
         }
         s.push_str(&format!(
-            "REVIEW {} = {}: net {:+} recall@1 on gate\n",
+            "{YELLOW}REVIEW {} = {}: net {:+} recall@1 on gate{YELLOW:#}\n",
             knob.name(),
             fv(c.value),
             c.gains.len() as i64 - c.losses.len() as i64,
@@ -468,26 +498,29 @@ pub(crate) fn suggestion(
         s.push_str(&format!("    losses: {}\n", name_list(&c.losses)));
         match &c.collateral {
             Some(coll) => {
+                // A named casualty is the disqualifier; it must not read
+                // as one more list item.
+                let cas = if coll.casualties.is_empty() {
+                    name_list(&coll.casualties)
+                } else {
+                    format!("{RED}{}{RED:#}", name_list(&coll.casualties))
+                };
                 s.push_str(&format!(
-                    "    collateral: casualties {}; rehabilitated {}\n",
-                    name_list(&coll.casualties),
+                    "    collateral: casualties {cas}; rehabilitated {}\n",
                     name_list(&coll.rehabilitated),
                 ));
-                if !coll.rehabilitated.is_empty() {
-                    s.push_str(
-                        "    (a rehabilitation counts only once its mechanism is verified)\n",
-                    );
-                }
             }
-            None => s.push_str("    collateral: NOT CHECKED — no known-failures fixture given\n"),
+            None => s.push_str(&format!(
+                "    collateral: {RED}NOT CHECKED{RED:#} — no known-failures fixture given\n"
+            )),
         }
         s.push_str(
             "    explain each flip before pinning; this tool nominates, promotion is a human act",
         );
         if knob.config_key().is_none() {
             s.push_str(&format!(
-                "\n    note: {} has no config key — adopting a value is a \
-                 format-boundary conversation, not a config edit",
+                "\n{NOTE}    note: {} has no config key — adopting a value is a \
+                 format-boundary conversation, not a config edit{NOTE:#}",
                 knob.name()
             ));
         }
@@ -500,12 +533,12 @@ pub(crate) fn suggestion(
         // fixed one without saying so, and it would stay fixed across a
         // later --dims change where the derived floor would have moved.
         if knob == Knob::MinCos {
-            s.push_str(
-                "\n    note: min_cos in chops-search.toml is an override, not a \
+            s.push_str(&format!(
+                "\n{NOTE}    note: min_cos in chops-search.toml is an override, not a \
                  default — absent derives the floor from dims, present freezes \
                  it across a future --dims change. Pinning converts a derived \
-                 floor into a fixed one; say so in the commit.",
-            );
+                 floor into a fixed one; say so in the commit.{NOTE:#}",
+            ));
         }
     }
     s
@@ -534,10 +567,16 @@ fn knob_table(cells: &[Cell], cur: usize, n: usize, names: &[CaseOutcome]) -> St
         "", "value", "recall@1", "recall@3"
     );
     for (i, c) in cells.iter().enumerate() {
-        let mark = if i == cur { ">" } else { " " };
+        // The current row is the anchor everything diffs against; bold
+        // so the eye finds it in a long axis.
+        let (mark, row) = if i == cur {
+            (">", HEADING)
+        } else {
+            (" ", Style::new())
+        };
         let _ = writeln!(
             s,
-            "{mark:>2}{:>8} {:>8.0}% {:>8.0}%   {}",
+            "{row}{mark:>2}{:>8} {:>8.0}% {:>8.0}%   {}{row:#}",
             fv(c.value),
             pct(c.hit1, n),
             pct(c.hit3, n),
@@ -546,14 +585,19 @@ fn knob_table(cells: &[Cell], cur: usize, n: usize, names: &[CaseOutcome]) -> St
         // Both depths by name. A case can legitimately appear twice —
         // rank 1 → rank 5 is a `−` line and a `−3` line — because those
         // are two facts. Only the @1 lines feed nomination (net1()).
-        for (mark, idxs) in [
-            ("+", &c.flips.gained1),
-            ("−", &c.flips.lost1),
-            ("+3", &c.flips.gained3),
-            ("−3", &c.flips.lost3),
+        for (mark, idxs, style) in [
+            ("+", &c.flips.gained1, GREEN),
+            ("−", &c.flips.lost1, RED),
+            ("+3", &c.flips.gained3, GREEN),
+            ("−3", &c.flips.lost3, RED),
         ] {
             for &i in idxs {
-                let _ = writeln!(s, "{:>14}{mark:<2} {}", "", label(&names[i]));
+                let _ = writeln!(
+                    s,
+                    "{:>14}{style}{mark:<2} {}{style:#}",
+                    "",
+                    label(&names[i])
+                );
             }
         }
     }
@@ -574,6 +618,27 @@ fn fv(v: f32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Assertions match words, not escape codes.
+    fn plain(s: &str) -> String {
+        anstream::adapter::strip_str(s).to_string()
+    }
+
+    /// A +2 candidate with one named casualty — fresh each call, since
+    /// CandidateReport is not Clone and suggestion() borrows a slice.
+    fn cand_with_casualty() -> CandidateReport {
+        CandidateReport {
+            value: 0.12,
+            gains: vec![
+                "[paraphrase] \"hide a page\"".into(),
+                "[exact] \"prefix_rows\"".into(),
+            ],
+            losses: vec![],
+            collateral: Some(CollateralFlips {
+                casualties: vec!["[paraphrase] \"make the download smaller\"".into()],
+                rehabilitated: vec![],
+            }),
+        }
+    }
 
     fn oc(q: &str, hit1: bool, hit3: bool) -> CaseOutcome {
         CaseOutcome {
@@ -638,7 +703,7 @@ mod tests {
     fn keep_states_plateau_and_cliffs() {
         let axis = [0.0, 0.04, 0.08, 0.12, 0.16];
         let inert = [false, true, true, true, false];
-        let s = suggestion(Knob::MinGap, &axis, &inert, 2, &[]);
+        let s = plain(&suggestion(Knob::MinGap, &axis, &inert, 2, &[]));
         assert!(s.starts_with("keep 0.08"), "{s}");
         assert!(s.contains("plateau 0.04–0.12"), "{s}");
         assert!(s.contains("cliff below at 0"), "{s}");
@@ -651,29 +716,23 @@ mod tests {
         // must not promise a margin nobody measured.
         let axis = [0.1, 0.2, 0.3];
         let inert = [true, true, true];
-        let s = suggestion(Knob::WTag, &axis, &inert, 1, &[]);
+        let s = plain(&suggestion(Knob::WTag, &axis, &inert, 1, &[]));
         assert!(s.contains("flat across the whole axis"), "{s}");
         let inert2 = [false, true, true];
-        let s2 = suggestion(Knob::WTag, &axis, &inert2, 1, &[]);
+        let s2 = plain(&suggestion(Knob::WTag, &axis, &inert2, 1, &[]));
         assert!(s2.contains("axis edge above (unmeasured"), "{s2}");
         assert!(!s2.contains("cliff above"), "{s2}");
     }
 
     #[test]
     fn candidates_are_nominated_never_adopted() {
-        let cand = CandidateReport {
-            value: 0.12,
-            gains: vec![
-                "[paraphrase] \"hide a page\"".into(),
-                "[exact] \"prefix_rows\"".into(),
-            ],
-            losses: vec![],
-            collateral: Some(CollateralFlips {
-                casualties: vec!["[paraphrase] \"make the download smaller\"".into()],
-                rehabilitated: vec![],
-            }),
-        };
-        let s = suggestion(Knob::MinGap, &[0.08, 0.12], &[true, false], 0, &[cand]);
+        let s = plain(&suggestion(
+            Knob::MinGap,
+            &[0.08, 0.12],
+            &[true, false],
+            0,
+            &[cand_with_casualty()],
+        ));
         assert!(s.contains("REVIEW min_gap = 0.12"), "{s}");
         assert!(s.contains("net +2"), "{s}");
         assert!(s.contains("casualties [paraphrase]"), "{s}");
@@ -689,7 +748,13 @@ mod tests {
             losses: vec![],
             collateral: None,
         };
-        let s = suggestion(Knob::RrfK, &[8.0, 60.0], &[false, true], 1, &[cand]);
+        let s = plain(&suggestion(
+            Knob::RrfK,
+            &[8.0, 60.0],
+            &[false, true],
+            1,
+            &[cand],
+        ));
         assert!(s.contains("NOT CHECKED"), "{s}");
         // Rule 3: no config key means a format-boundary note.
         assert!(s.contains("format-boundary conversation"), "{s}");
@@ -705,18 +770,13 @@ mod tests {
 
     #[test]
     fn a_min_cos_candidate_warns_about_override_semantics() {
-        // min_cos is the only knob whose config key changes the KIND of
-        // value (derived → fixed), not just its magnitude.
-        let cand = CandidateReport {
-            value: 0.32,
-            gains: vec!["a".into(), "b".into()],
-            losses: vec![],
-            collateral: Some(CollateralFlips {
-                casualties: vec![],
-                rehabilitated: vec![],
-            }),
-        };
-        let s = suggestion(Knob::MinCos, &[0.28, 0.32], &[true, false], 0, &[cand]);
+        let s = plain(&suggestion(
+            Knob::MinCos,
+            &[0.28, 0.32],
+            &[true, false],
+            0,
+            &[cand_with_casualty()],
+        ));
         assert!(s.contains("override, not a default"), "{s}");
         assert!(s.contains("--dims"), "{s}");
         // Not the format-boundary note: min_cos HAS a config key.
@@ -729,7 +789,13 @@ mod tests {
             losses: vec![],
             collateral: None,
         };
-        let s2 = suggestion(Knob::MinGap, &[0.08, 0.12], &[true, false], 0, &[cand2]);
+        let s2 = plain(&suggestion(
+            Knob::MinGap,
+            &[0.08, 0.12],
+            &[true, false],
+            0,
+            &[cand2],
+        ));
         assert!(!s2.contains("override, not a default"), "{s2}");
     }
     #[test]
@@ -752,7 +818,7 @@ mod tests {
             hit3: 1,
             flips: f,
         };
-        let t = knob_table(&[cell], 0, 1, &base);
+        let t = plain(&knob_table(&[cell], 0, 1, &base));
         assert!(t.contains("+3 [exact] \"a\""), "{t}");
         assert!(
             !t.contains("+  [exact]"),
@@ -774,8 +840,63 @@ mod tests {
             hit3: 0,
             flips: f,
         };
-        let t = knob_table(&[cell], 0, 1, &base);
+        let t = plain(&knob_table(&[cell], 0, 1, &base));
         assert!(t.contains("−  [exact] \"a\""), "{t}");
         assert!(t.contains("−3 [exact] \"a\""), "{t}");
+    }
+
+    #[test]
+    fn style_markers_interpolate_or_fail_loudly() {
+        // A literal "{NOTE}" survives plain() because it is not an
+        // escape code, so a missed format! passes every other test.
+        // Check both: no braces after stripping, and an escape before.
+        for (knob, cand) in [
+            (Knob::MinGap, cand_with_casualty()),
+            (
+                Knob::RrfK,
+                CandidateReport {
+                    value: 8.0,
+                    gains: vec!["a".into(), "b".into()],
+                    losses: vec![],
+                    collateral: None,
+                },
+            ),
+            (
+                Knob::MinCos,
+                CandidateReport {
+                    value: 0.32,
+                    gains: vec!["a".into(), "b".into()],
+                    losses: vec![],
+                    collateral: Some(CollateralFlips {
+                        casualties: vec![],
+                        rehabilitated: vec![],
+                    }),
+                },
+            ),
+        ] {
+            let styled = suggestion(knob, &[0.1, 0.2], &[true, false], 0, &[cand]);
+            assert!(!plain(&styled).contains('{'), "{}: {styled}", knob.name());
+            assert!(
+                styled.contains('\u{1b}'),
+                "{}: no style rendered: {styled}",
+                knob.name()
+            );
+        }
+        // And the table.
+        let base = vec![oc("a", true, true)];
+        let f = diff_outcomes(&base, &[oc("a", false, false)]);
+        let t = knob_table(
+            &[Cell {
+                value: 0.2,
+                hit1: 0,
+                hit3: 0,
+                flips: f,
+            }],
+            0,
+            1,
+            &base,
+        );
+        assert!(!plain(&t).contains('{'), "{t}");
+        assert!(t.contains('\u{1b}'), "{t}");
     }
 }

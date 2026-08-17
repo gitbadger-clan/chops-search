@@ -527,6 +527,20 @@ value to pin from a 1-D table.")]
         /// standalone `query` invocation can reproduce.
         #[arg(long)]
         explain: bool,
+        /// Also save the transcript to FILE. The saved copy is prefixed
+        /// with the exact command line, so a transcript found later
+        /// states which fixture, base flags, and knob produced it.
+        ///
+        /// Terminal output is unchanged. `--explain` blocks stream to
+        /// the terminal only; the file marks where each one was.
+        #[arg(short = 'O', long = "output", value_name = "FILE")]
+        output: Option<PathBuf>,
+        /// Also push the transcript to the system clipboard (pbcopy,
+        /// wl-copy/xclip/xsel, or clip.exe — whichever is installed).
+        /// An explicit request, so a missing tool is an error, not a
+        /// silent no-op.
+        #[arg(long)]
+        clipboard: bool,
         // ---- fixed base under the walk, same flags as eval ----
         /// Relevance-floor base. Default: the index.bin override, or
         /// derived from dimensionality when none was baked.
@@ -735,6 +749,8 @@ fn main() -> Result<()> {
             knobs,
             values,
             explain,
+            output,
+            clipboard,
             min_cos,
             chunk_penalty,
             kw_floor,
@@ -777,6 +793,8 @@ fn main() -> Result<()> {
                     values,
                     collateral,
                     explain,
+                    output,
+                    clipboard,
                     score: chops_search::eval::ScoreArgs {
                         min_cos,
                         chunk_penalty,
