@@ -94,8 +94,12 @@ This prints the evidence behind the ranking: how the query tokenized on both
 sides, per-term keyword scores with document frequencies and per-field term
 frequencies, best-chunk cosine per document, and each engine's contribution
 to the fused order. When a result looks wrong the answer is almost always
-visible in the chunk count or in which field the term turned up in. Three
-patterns account for most misses:
+visible in the chunk count or in which field the term turned up in.
+
+`chops-search eval --explain` prints the same evidence for every failing case 
+in one run, on the exact engine and flags the pass used.
+
+Three patterns account for most misses:
 
 - **The expectation is wrong.** The "wrong" winner genuinely answers the
   query. Fix the fixture, not the engine.
@@ -105,24 +109,37 @@ patterns account for most misses:
   matches no documents while a common one scores. That's a ranking issue
   worth filing.
 
-## 5. Calibrate, if a sweep says so
+## 5. Calibrate, if the walk says so
 
-Every scoring knob has an `eval` flag, so sweeping needs no rebuild: the
-flags override what `index.bin` baked, for that run only. The fusion pair
-even has a grid mode:
+Every scoring knob is baked into `index.bin`, and `calibrate` walks each
+one against your query set without a rebuild:
+
+```sh
+chops-search calibrate
+```
+
+For every knob you get a table, one row per value, with the current value
+marked `>` and every case that moved named under its row, then a verdict.
+Nearly every verdict will be `keep`, stating the plateau the value sits on;
+that is the answer, not a lack of one. A `REVIEW` names a value that gained
+at least two cases, lists what it gained and lost, and re-runs it against
+`fixtures/known-failures.toml` to name what it would break there. A named
+casualty ends the review.
+
+The fusion pair is coupled, so its joint grid stays in `eval`:
 
 ```sh
 chops-search eval --sweep-rrf-k 2,4,8,16,32,60 --sweep-rrf-alpha 0,0.5,1,2
 ```
 
-This runs the full case set once per cell, prints recall per cell, and
-re-runs the best cell for its per-kind breakdown. The loop for any knob is:
-sweep with `eval`, verify the mechanism behind a winning value with
-`chops-search query` (a cell can win by coincidence; the explain output
-shows whether the parameter did what you think it did), then pin the value
-in `chops-search.toml` and rebuild. Only the committed, rebuilt value
-reaches the browser; the [configuration reference](/reference/configuration/)
-covers which keys bake where.
+The loop for any nominated value is: explain each named flip
+(`calibrate --explain` prints them on the candidate's own engine state, or
+use `chops-search query`), decide whether the mechanism is real or a
+coincidence, then pin the value in `chops-search.toml` and rebuild. Only
+the committed, rebuilt value reaches the browser; the
+[configuration reference](/reference/configuration/) covers which keys bake
+where. Save the transcript (`-O` or `--clipboard`): a dated calibrate run is
+the thing you diff the next one against.
 
 ## 6. Gate it in CI
 

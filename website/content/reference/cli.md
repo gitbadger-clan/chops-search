@@ -61,6 +61,7 @@ configured; the build log's `scoring:` line states what shipped.
 | `--min-gap <GAP>` | `min_gap` from config (0, disarmed) | Corroboration gate threshold to bake into index.bin. Calibrate with `eval --min-gap` first; this flag ships the value, it doesn't sweep it |
 | `--rrf-alpha <ALPHA>` | `rrf_alpha` from config (0, plain RRF) | Fusion weighting to bake into index.bin |
 | `--min-cos <COS>` | `min_cos` from config (derive from dims) | Relevance-floor override to bake into index.bin; 0 disables the floor |
+| `--chunk-penalty <COEFF>` | `chunk_penalty` from config (compiled 0.02) | Chunk-count correction to bake into index.bin; 0 disables |
 | `--no-runtime` | off | Artifacts only, skip the wasm/JS runtime |
 
 ## `chops-search docs`
@@ -108,7 +109,7 @@ works without a rebuild.
 | `--kind <KIND>` | all | Only run cases of this kind |
 | `--fail-under <FRACTION>` | 0.0 | Exit non-zero below this overall recall@1. Ignored in sweep mode |
 | `--min-cos <COS>` | index.bin override, or derived from dims | Sweep the relevance floor |
-| `--chunk-penalty <COEFF>` | 0.02 | Sweep the chunk-count correction; 0 disables |
+| `--chunk-penalty <COEFF>` | 0.02 | from index.bin (compiled 0.02 on an uncalibrated corpus) |
 | `--kw-floor <FRACTION>` | 0.30 | Sweep the keyword evidence gate; 0 disables |
 | `--w-title <WEIGHT>` | from index.bin | Sweep the BM25F title weight |
 | `--w-tag <WEIGHT>` | from index.bin | Sweep the BM25F tag weight |
@@ -119,6 +120,7 @@ works without a rebuild.
 | `--rrf-k <K>` | 60 | Pin a swept rank discount |
 | `--sweep-rrf-k <LIST>` | | Comma-separated `rrf_k` values, e.g. `2,4,8,16,32,60`. Enables sweep mode |
 | `--sweep-rrf-alpha <LIST>` | | Comma-separated `rrf_alpha` values, e.g. `0,0.5,1,2`. Enables sweep mode |
+| `--explain` | off | Print each failure's explain inline, on the same engine and scoring the pass used, flags and sweep cells included. In sweep mode, applies to the best cell's re-run |
 
 **Sweep mode.** With either sweep flag the case set runs once per point of
 the k × alpha grid and prints recall per cell instead of per-case lines;
@@ -126,6 +128,58 @@ every other scoring flag acts as the fixed base for every cell, and the
 best cell is re-run for its per-kind breakdown and failure list.
 `--fail-under` is ignored, since half the grid is supposed to be worse than
 the baseline; that's what a sweep is.
+
+## `chops-search calibrate`
+
+Walk each scoring knob one value at a time against the gate query set and
+report, per knob, whether the current value should stay. Every cell is one
+full eval pass with exactly one field changed from the baked base, diffed
+against the baseline case by case: totals are never compared, since a
++2/-2 wash prints as zero. Under each row of the table the moved cases are
+named, `+` and `-` for recall@1, `+3` and `-3` for recall@3, so a case
+that fell off the podium shows on two lines; only recall@1 movement can
+nominate a value.
+
+Verdicts are nominations, never edits. `keep <value>` states the plateau
+the current value sits on and the nearest measured cliff on each side; an
+axis edge is reported as unmeasured beyond, not as safe. `REVIEW <value>`
+means a cell gained at least two cases at recall@1 net of losses: the
+printout names every gained and lost case, re-runs the candidate against
+the known-failures fixture and names casualties there, and ends at
+"explain each flip before pinning". A named casualty blocks promotion.
+This command never writes `chops-search.toml`.
+
+Expect `keep` on nearly every knob. That is the calibration holding, not
+the tool failing, and it is the point: permission to stop turning knobs
+and go work on the corpus or the fixtures instead.
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--artifacts <DIR>` | `out` from config | Artifacts directory to read |
+| `--queries <FILE>` | `fixtures/queries.toml` beside the config | Gate query set. Deliberately not a merged all-fixtures file: calibrating against disputed verdicts is co-adaptation |
+| `--collateral <FILE>` | `fixtures/known-failures.toml` beside the config, when present | Casualty checks for candidates. Missing is allowed; candidates then print as casualty-unchecked |
+| `--knob <NAME>` | all | Knob to walk (repeatable): `min_gap`, `rrf_alpha`, `rrf_k`, `kw_floor`, `chunk_penalty`, `w_title`, `w_tag`, `w_desc`, `min_cos` |
+| `--values <LIST>` | per-knob axis | Explicit comma-separated axis; requires exactly one `--knob`. The current value is spliced in as an anchor cell (marked `>`), so a three-value list shows four rows |
+| `--explain` | off | Print the explain for every case a candidate flips, on the engine holding the candidate's values |
+| `-O, --output <FILE>` | | Also save the transcript, prefixed with the exact command line. Styles are stripped; explains stream to the terminal only and the file marks where each was |
+| `--clipboard` | off | Also push the transcript to the system clipboard (pbcopy, wl-copy, xclip, xsel, or clip.exe). A missing tool is an error |
+| scoring flags | from index.bin | The same ten flags as `eval`, here fixing the base under the walk. A flagged base is marked `*` in the `scoring:` header |
+
+`strong_cos` is not walked: it disables at infinity, so a linear axis has
+no honest cell for "off". `rrf_k` and `rrf_alpha` walk separately but are
+coupled; a candidate on either is a pointer at the joint
+`eval --sweep-rrf-k --sweep-rrf-alpha` grid, not a value to pin from a
+one-dimensional table. `rrf_k` and `kw_floor` have no config key, and a
+candidate on them says so. `min_cos` has one, but pinning it changes the
+kind of value: unset derives the floor from `dims`, set freezes it across
+a future `dims` change, and a `min_cos` nomination carries that note.
+
+For a finer axis, generate it in the shell:
+
+```fish
+chops-search calibrate --knob min_cos --values (seq 0.27 0.01 0.34 | string join ,)
+```
+
 
 ## `chops-search completions <SHELL>`
 

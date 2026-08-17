@@ -16,7 +16,7 @@ runtime.
 | --- | --- | --- |
 | `model.meta.<hash>.bin` | Eager, gzipped | Complete vocab + per-row quantization scales. Never partial: a truncated vocab tokenizes silently wrong |
 | `model.prefix.<hash>.i8` | Eager | Top ~2048 frequency-ordered rows, covering most queries outright |
-| `index.<hash>.bin` | Eager, gzipped | Chunk vectors, document URLs and titles, keyword postings, plus the BM25F field weights and the scoring calibration (`min_gap`, `rrf_alpha`, `min_cos` override) baked at build time, so the browser scores with what the site configured |
+| `index.<hash>.bin` | Eager, gzipped | Chunk vectors, document URLs and titles, keyword postings, plus the BM25F field weights and the scoring calibration (`min_gap`, `rrf_alpha`, `min_cos`, `chunk_penalty` override) baked at build time, so the browser scores with what the site configured |
 | `model.rows.<hash>.i8` | Range-fetched per query | Full matrix, headerless raw i8; row *i* at byte *i × dim* |
 | `snippets.<hash>.bin` | Range-fetched | Offset table fetched once at boot as a single small range; per-chunk display text fetched after ranking |
 | `manifest.json` | Eager, revalidating | Names every hashed file; the only unhashed artifact |

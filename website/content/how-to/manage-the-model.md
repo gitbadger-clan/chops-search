@@ -69,7 +69,7 @@ Two things to know before touching it:
   dims changes what counts as "related enough"; dimensionality reduction is
   real information loss. A `min_cos` key in the config pins the floor
   explicitly instead, and precisely because a value calibrated at one dims
-  is wrong at another, leave it unset unless a sweep said otherwise.
+  is wrong at another, leave it unset unless `calibrate` said otherwise.
 
 So the procedure is: change the value, `chops-search build`, then
 `chops-search eval` against your labelled set before shipping. If you don't

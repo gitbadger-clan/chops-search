@@ -58,6 +58,19 @@ number to watch for near-duplicate corpora where two pages legitimately
 compete for the same queries. `--fail-under <FRACTION>` gates on overall
 recall@1.
 
+## Two files, two roles
+
+`fixtures/queries.toml` is the gate: the cases CI enforces with
+`--fail-under`, and the set `calibrate` walks. `fixtures/known-failures.toml`
+has the same format and holds cases with a standing verdict that isn't a
+pass: a query the corpus can't yet answer, or a negative control that
+leaks at the current floor. It is never a gate. `calibrate` uses it as
+collateral: every candidate value re-runs against it, and a case that
+regresses there is a named casualty that blocks promotion, however good
+the gate numbers look. Keep the two files separate; folding a disputed
+case into the gate is how a knob gets tuned to a fixture instead of a
+corpus.
+
 ## Writing a good set
 
 Small and honest beats large and aspirational: even eight cases catch a

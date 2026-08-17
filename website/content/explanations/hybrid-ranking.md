@@ -61,7 +61,7 @@ Content is split into chunks of roughly 600 characters, each embedded as the
 mean of its token vectors. A query embeds the same way and scores against
 chunks by cosine; a document's semantic score is its best chunk's, with a
 correction for chunk count, since the max over n chunks grows as √(2 ln n)
-on sampling alone (`chunk_penalty`, default 0.02, anchored to that
+on sampling alone (`chunk_penalty`, compiled default 0.02, calibrated per corpus and baked into index.bin, anchored to that
 extreme-value bound rather than an arbitrary length fudge).
 
 ## The relevance floor
@@ -112,13 +112,15 @@ ranks up. Sweep them jointly with `eval --sweep-rrf-k --sweep-rrf-alpha`.
 
 ## Where the numbers live
 
-The field weights and the calibration (`min_gap`, `rrf_alpha`, `min_cos`)
+The field weights and the calibration (`min_gap`, `rrf_alpha`, `chunk_penalty`, `min_cos`)
 are baked into `index.bin` at build time and read by the engine at
 construction, so the browser, a bare `chops-search eval`, and CI all score
 the same configuration from the same bytes. The `eval` and `query` flags
 override per run, which is how sweeping works without a rebuild; only a
-rebuild changes what visitors run. This is exactly why the
-[eval harness](/tutorials/evaluate-your-search/) exists.
+rebuild changes what visitors run. `chops-search calibrate` walks each of them against the labelled set and
+reports whether the baked value sits on a plateau or next to a cliff, with
+every moved case named; a candidate is nominated with its casualties, never
+adopted.This is exactly why the [eval harness](/tutorials/evaluate-your-search/) exists.
 
 Every claim on this page is inspectable: `chops-search query "anything"`
 prints per-term keyword scores with per-field frequencies, best-chunk
