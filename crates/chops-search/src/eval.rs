@@ -26,17 +26,10 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-use anstyle::{AnsiColor, Style};
+use crate::transcript::{GREEN, HEADING, RED, YELLOW};
 use anyhow::{Context, Result, bail};
 use chops_search_core::engine::Engine;
 use chops_search_core::score::ScoreOpts;
-
-// Color renders only on a tty (anstream strips otherwise), so the
-// transcripts the sweep protocol diffs and greps stay byte-plain.
-const GREEN: Style = AnsiColor::Green.on_default();
-const YELLOW: Style = AnsiColor::Yellow.on_default();
-const RED: Style = AnsiColor::Red.on_default().bold();
-const HEADING: Style = Style::new().bold();
 
 pub(crate) struct Case {
     pub(crate) q: String,

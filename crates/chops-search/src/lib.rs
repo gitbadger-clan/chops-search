@@ -15,3 +15,4 @@ pub mod knob;
 pub mod model;
 pub mod model_loader;
 pub mod pca;
+pub mod transcript;
