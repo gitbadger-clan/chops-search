@@ -166,7 +166,7 @@ impl ScoreArgs {
         .any(Option::is_some);
         let mut s = format!(
             "kw_floor {:.2}{}, w_title {:.2}{}, w_tag {:.2}{}, w_desc {:.2}{}, \
-             min_cos {:.2}{}, chunk_penalty {:.3}{}, min_gap {:.2}{}, strong_cos {}{}, \
+             min_cos {:.3}{}, chunk_penalty {:.3}{}, min_gap {:.2}{}, strong_cos {}{}, \
              rrf_alpha {:.2}{}, rrf_k {:.1}{}",
             o.kw_confidence,
             m(self.kw_floor.is_some()),
