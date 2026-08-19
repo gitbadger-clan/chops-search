@@ -72,6 +72,7 @@ Two things to know before touching it:
   is wrong at another, leave it unset unless `calibrate` said otherwise.
 
 So the procedure is: change the value, `chops-search build`, then
-`chops-search eval` against your labelled set before shipping. If you don't
-have a query set yet, that's the [tutorial to do
+`chops-search eval` against your labelled set, and `chops-search plan`
+for what the change did to the eager prefix and per-query cost, before
+shipping. If you don't have a query set yet, that's the [tutorial to do
 first](/tutorials/evaluate-your-search/).

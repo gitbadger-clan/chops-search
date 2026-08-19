@@ -95,9 +95,13 @@ curl -sI https://your.site/search/manifest.json | grep -i cache-control
    and read the network tab: per-query requests should be partial responses
    of a kilobyte or less.
 
+   `chops-search plan "some query" --curl https://your.site/search | sh`
+   runs the exact range requests the browser would make and prints each status;
+   every line should be `206`. A `200` with a multi-megabyte count is the range-hostile case.
+
 {% aside(kind="tip", title="What a healthy deploy looks like") %}
 First visit: the eager artifacts and wasm load once. Every query after that:
 either no network at all (prefix hit or warm row cache) or one or two range
-requests totalling around 0.9 KB. If you see the full row matrix downloading per query,
+requests totalling a few hundred bytes. If you see the full row matrix downloading per query,
 range requests are being rejected somewhere in front of your files.
 {% end %}

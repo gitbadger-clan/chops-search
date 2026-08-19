@@ -141,7 +141,26 @@ the committed, rebuilt value reaches the browser; the
 where. Save the transcript (`-O` or `--clipboard`): a dated calibrate run is
 the thing you diff the next one against.
 
-## 6. Gate it in CI
+## 6. Measure the network side
+
+Recall is one half of the calibration; what a query costs the visitor is
+the other, and `prefix_rows` is the knob that trades one against the
+other. Run it against the same query set:
+
+```sh
+chops-search plan
+chops-search plan --prefix-rows 512,1024,2048,4096
+```
+
+Read the `coverage:` line first: it says how big the eager prefix would
+need to be to cover 90% of the rows your queries need. Then read the table
+as a trade: the `eager` column is what every visitor downloads once, the
+`bytes/q` column is what a cold query fetches. Expect the shipped value to
+sit on a plateau; if the next doubling of eager payload buys a rounding
+error in bytes per query, that is a `keep`, and it is worth writing down
+with the date the same way a calibrate transcript is.
+
+## 7. Gate it in CI
 
 ```sh
 chops-search eval --fail-under 0.85

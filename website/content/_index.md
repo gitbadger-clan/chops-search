@@ -27,11 +27,10 @@ variant = "minimal"
 {{ linkcard(title="Evaluate your search", href="/tutorials/evaluate-your-search/", description="Turn ranking quality into a number and gate it in CI.") }}
 
 `chops-search` is hybrid keyword + semantic search for static sites, running
-entirely in the browser. The "model" is a model2vec/potion int8 lookup table
-streamed over HTTP range requests, so a query costs about 0.9 KB on average
-rather than the tens of megabytes a transformer would. Try it right now: the
-search on this site is chops-search, indexing these docs. Press `Cmd-K` (or
-`/`) and phrase a question in words the pages don't use.
+entirely in the browser. The "model" is a model2vec/potion int8 lookup table streamed over HTTP
+range requests, so most queries touch no network at all and the rest fetch
+a row or two out of a multi-megabyte file. `chops-search plan` prints the
+exact byte ranges for any query, and the curl commands to check them.
 
 {% cardgrid() %}
 {% card(title="Hybrid ranking", icon="setting") %}

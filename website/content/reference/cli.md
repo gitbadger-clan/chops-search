@@ -55,7 +55,7 @@ configured; the build log's `scoring:` line states what shipped.
 | `--content <DIR>` | `content` from config | Content directory |
 | `--model <DIR>` | `model` from config | Model directory |
 | `--out <DIR>` | `out` from config | Output directory |
-| `--prefix-rows <N>` | 2048 | Rows bundled eagerly; larger means bigger eager payload, fewer range requests |
+| `--prefix-rows <N>` | 2048 | Rows bundled eagerly; larger means bigger eager payload, fewer range requests. `chops-search plan --prefix-rows` measures the trade before you rebuild |
 | `--chunk-chars <N>` | 600 | Target chunk size; smaller sharpens rare-word signal, costs more vectors |
 | `--dims <N>` | `dims` from config, or the model's native size | PCA target; re-run `eval` after changing |
 | `--min-gap <GAP>` | `min_gap` from config (0, disarmed) | Corroboration gate threshold to bake into index.bin. Calibrate with `eval --min-gap` first; this flag ships the value, it doesn't sweep it |
@@ -129,6 +129,48 @@ best cell is re-run for its per-kind breakdown and failure list.
 `--fail-under` is ignored, since half the grid is supposed to be worse than
 the baseline; that's what a sweep is.
 
+## `chops-search plan [QUERY]`
+
+The network-cost instrument. Without a `QUERY`, it runs the gate query set
+and prints, per (prefix, gap) cell, the eager payload every visitor
+downloads against the per-query cost: prefix hit rate by rows, the share
+of queries that fetch nothing, bytes and requests per query with their
+maxima, and dead bytes (rows fetched only because coalescing merged across
+a gap). A `coverage:` line states the prefix size that would cover 50, 90,
+99, and 100 percent of the rows the fixture needs, and two tables name the
+rows outside the prefix and the costliest cases, so a surprising mean can
+be traced to a line.
+
+With a `QUERY`, it prints the detail: each token's row, whether it lives in
+the prefix or in a range, the coalesced ranges as inclusive byte spans, and
+the total against the rows file.
+
+Prefix sizes and gaps are simulated from the frequency-ordered row ids, so
+no rebuild is needed; the simulator is checked against the engine's own
+planner at the shipped cell over every case before anything prints, and a
+mismatch is a hard error.
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--artifacts <DIR>` | `out` from config | Artifacts directory to read |
+| `--queries <FILE>` | `fixtures/queries.toml` beside the config | Query set for aggregate mode |
+| `--kind <KIND>` | all | Only cases of this kind |
+| `--prefix-rows <LIST>` | the artifact's value | Comma-separated prefix sizes to simulate, e.g. `512,1024,2048,4096` |
+| `--max-gap <LIST>` | the engine's constant | Comma-separated coalescing gaps to simulate, e.g. `0,4,8,16,32` |
+| `--curl <BASE_URL>` | | Emit one curl per range against the hashed rows file under this URL, each printing the status and byte count the server returned. Diagnostics go to stderr; pipe stdout to `sh`. Refused with `--prefix-rows` or `--max-gap`: curling bytes the browser would not fetch is not a demonstration |
+| `--top <N>` | 10 | Rows in the missing-tokens and costliest-cases tables |
+
+The `--curl` output is verified by the server, not by the tool: every line
+should read `206` with a byte count equal to the span's length. A `200`
+means the host ignored the `Range` header, which is the condition the
+worker detects and degrades from.
+
+```sh
+chops-search plan
+chops-search plan --prefix-rows 256,512,1024,2048
+chops-search plan "content security policy" --curl https://your.site/search | sh
+```
+
 ## `chops-search calibrate`
 
 Walk each scoring knob one value at a time against the gate query set and
@@ -185,4 +227,4 @@ chops-search calibrate --knob min_cos --values (seq 0.27 0.01 0.34 | string join
 
 Emit a conventional static completion script. Prefer the
 [dynamic path](/how-to/shell-completion/), which computes candidates at
-completion time.
+completion time. Hidden from `--help`; it still works.

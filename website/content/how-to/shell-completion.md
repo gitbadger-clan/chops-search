@@ -41,7 +41,8 @@ chops-search completions fish   # or zsh, bash, and friends
 
 writes a conventional completion script to stdout. Prefer the dynamic path
 where your shell supports it; the static script's candidates are frozen at
-generation time.
+generation time. The subcommand is hidden from `--help` to keep the dynamic
+path the advertised one; it is still there.
 
 {% aside(kind="note", title="After upgrading") %}
 The dynamic hook re-invokes the installed binary per completion request, so

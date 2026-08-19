@@ -48,7 +48,7 @@ model   = ".chops-search/model"
 | `model` | `.chops-search/model` | The lockfile lives beside this directory |
 | `dims` | unset (native size) | Real PCA, not truncation; `init` scaffolds `128`. [Re-eval after changing](/how-to/manage-the-model/) |
 | `chunk_chars` | `600` | Smaller sharpens rare-word signal, costs more vectors. Values below 100 are rejected |
-| `prefix_rows` | `2048` | Larger trades eager payload for fewer range requests |
+| `prefix_rows` | `2048` | Larger trades eager payload for fewer range requests. `chops-search plan --prefix-rows` measures the trade against your query set without a rebuild |
 
 ## BM25F field weights
 
