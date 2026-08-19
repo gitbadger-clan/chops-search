@@ -57,14 +57,18 @@ each token's row and whether the eager prefix already holds it, and
 `--curl` emits the range requests so the server can confirm the byte
 counts. Over a whole labelled set it reports prefix hit rate, share of
 queries fetching nothing, and mean bytes per query. On this site's gate
-fixture (37 cases, measured 2026-08-19 at `192bfdb`, dims 128, the shipped
-2048-row prefix, gap 8) 26 of 37 queries fetch nothing, the prefix holds
-86% of the rows the fixture needs, and the mean cost is 86 bytes per query
-against a 3.6 MB rows file, 640 bytes worst case. `eval` reproduces those
-numbers warm across the run. Halving the prefix to 1024 rows saves every
-visitor 128 KB once and costs 55 bytes more per query on average; doubling
-it reaches 90% coverage at 4203 rows for another 256 KB. 2048 is where the
-prefix trades bytes for latency in the right direction for this corpus.
+fixture (36 cases, measured 2026-08-19 at `40805d4`, dims 128, the shipped
+2048-row prefix, gap 8) 26 of 36 queries fetch nothing, the prefix holds
+89% of the rows the fixture needs, and the mean cost is 71 bytes per query
+against a 3.6 MB rows file, 512 bytes worst case. `eval`, warm across the
+run, lands on the same numbers. Halving the prefix to 1024 rows saves
+every visitor 128 KB once and costs 60 bytes more per query on average,
+but drops the zero-fetch share from 72% to 53%, and a first-keystroke
+round trip is what the prefix exists to remove; going the other way, 90%
+coverage needs 3306 rows, another 160 KB for every visitor to shave the
+last few range fetches off the tail. 2048 stays. The fixture is an upper
+bound on hit rate, since visitors type words its author did not think of,
+so read these as the calibration numbers, not a promise.
 
 The honest fine print: because the row matrix is frequency-permuted against
 the corpus, a content rebuild changes every artifact's hash, not just the
