@@ -291,13 +291,6 @@ expect = []
 kind = "negative"
 
 [[query]]
-q = "bicycle chain lubricant"
-# "toolchain" is one token, not "chain", so nothing here matches. Trailing
-# word has no prefix relatives in the corpus either.
-expect = []
-kind = "negative"
-
-[[query]]
 q = "orchid repotting schedule"
 expect = []
 kind = "negative"

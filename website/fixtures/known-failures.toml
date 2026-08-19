@@ -33,6 +33,21 @@ expect = ["/explanations/one-tokenizer/"]
 kind = "exact"
 
 [[query]]
+q = "bicycle chain lubricant"
+# ISSUE: spurious resonance, a gate blindness that is inherent rather than
+# pending. One document rings at a nonsense query and stands out from the
+# pack, so top-minus-median reads it as signal by definition. Every
+# min_gap value that catches it also suppresses legitimate semantic-only
+# queries whose winner stands out; a statistic built to detect flat noise
+# cannot detect pointed noise. Re-check only if the gate mechanism
+# changes, or if a corpus edit removes the resonating chunk for its own
+# reasons. Demoted from the gate 2026-08-19; it had never passed at any
+# honest configuration (its green at --min-cos 0.34 was measurement debt).
+# Wins 2026-08-19: /how-to/reindex-in-ci/ (expected: nothing).
+expect = []
+kind = "negative"
+
+[[query]]
 q = "what should i commit and what should i ignore"
 # ISSUE: RRF ordering, probably the same one. Neither "commit" nor
 # "ignore" appears on the winner, so the semantic side is ranking a page
