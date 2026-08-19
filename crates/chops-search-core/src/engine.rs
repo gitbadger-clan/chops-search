@@ -20,7 +20,9 @@ use crate::wordpiece::Vocab;
 use crate::{FormatError, StoreError, rrf, score};
 
 /// Gap (in rows) below which two needed rows share one range request.
-const MAX_GAP_ROWS: u32 = 8;
+/// Public because `chops-search plan` reads it as the shipped cell of
+/// its --max-gap axis; the CLI must not carry its own copy of this.
+pub const MAX_GAP_ROWS: u32 = 8;
 
 pub struct Engine {
     vocab: Vocab,

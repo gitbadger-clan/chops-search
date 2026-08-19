@@ -51,6 +51,9 @@ EXAMPLES
   chops-search docs                     list indexed URLs
   chops-search query \"why this rank\"     explain a ranking
   chops-search eval --fail-under 0.85   gate on recall@1
+  chops-search calibrate                walk the scoring knobs
+  chops-search plan                     network cost over the fixture
+  chops-search plan \"range fetch\"       ranges one cold query fetches
 
   COMPLETE=fish chops-search | source   completions for this session
 
@@ -582,8 +585,69 @@ value to pin from a 1-D table.")]
         rrf_k: Option<f32>,
     },
 
-    /// Emit a shell completion script.
+    /// Measure what a cold query fetches; sweep the network knobs.
     #[command(long_about = "\
+The network-cost instrument. Without a QUERY, runs the gate fixture and \
+prints, per (prefix, gap) cell, the eager payload every visitor downloads \
+against the per-query cost: prefix hit rate, share of queries fetching \
+nothing, bytes and requests per query, and dead bytes from coalescing. \
+Prefix sizes and gaps are SIMULATED from the frequency-ordered row ids — \
+no rebuild — and the simulator is checked against the engine's own \
+planner at the shipped cell before anything prints.
+
+With a QUERY, prints the detail: each token's row, whether it lives in \
+the prefix or in a range, and the coalesced ranges.
+
+--curl BASE_URL emits one curl per range against the hashed rows file, \
+each printing the status and byte count the server returned, so the \
+plan is verified over HTTP rather than by this tool. Diagnostics go to \
+stderr; pipe stdout to sh. Refused with --prefix-rows or --max-gap: \
+curling bytes the browser would not fetch is not a demonstration.")]
+    Plan {
+        /// One query for detail mode. Omit to run the fixture.
+        #[arg(value_name = "QUERY", conflicts_with = "queries")]
+        query: Option<String>,
+        /// Artifacts directory. Default: `out` from chops-search.toml.
+        #[arg(long, value_name = "DIR")]
+        artifacts: Option<PathBuf>,
+        /// Fixture for aggregate mode. Default: fixtures/queries.toml
+        /// beside the config.
+        #[arg(long, value_name = "FILE")]
+        queries: Option<PathBuf>,
+        /// Only cases of this kind.
+        #[arg(long, value_name = "KIND", conflicts_with = "query",
+              add = completion::kind_candidates())]
+        kind: Option<String>,
+        /// Comma-separated prefix sizes (rows) to simulate, e.g.
+        /// 512,1024,2048,4096. Default: the artifact's value.
+        #[arg(
+            long,
+            value_name = "LIST",
+            value_delimiter = ',',
+            conflicts_with = "curl"
+        )]
+        prefix_rows: Vec<u32>,
+        /// Comma-separated coalescing gaps (rows) to simulate, e.g.
+        /// 0,4,8,16,32. Default: the engine's constant.
+        #[arg(
+            long,
+            value_name = "LIST",
+            value_delimiter = ',',
+            conflicts_with = "curl"
+        )]
+        max_gap: Vec<u32>,
+        /// Emit curl commands against this base URL, e.g.
+        /// https://chops-search.gitbadger.com/search
+        #[arg(long, value_name = "BASE_URL")]
+        curl: Option<String>,
+        /// Rows in the missing-tokens table. Default 10.
+        #[arg(long, value_name = "N", default_value_t = 10)]
+        top: usize,
+    },
+
+    /// Emit a shell completion script.
+    #[command(
+        long_about = "\
 Writes a conventional completion script to stdout.
 
 Prefer the dynamic path where your shell supports it, since it computes \
@@ -592,7 +656,9 @@ actually uses):
 
   fish:  echo 'COMPLETE=fish chops-search | source' >> ~/.config/fish/config.fish
   zsh:   echo 'source <(COMPLETE=zsh chops-search)' >> ~/.zshrc
-  bash:  echo 'source <(COMPLETE=bash chops-search)' >> ~/.bashrc")]
+  bash:  echo 'source <(COMPLETE=bash chops-search)' >> ~/.bashrc",
+        hide = true
+    )]
     Completions {
         /// Shell to generate for.
         #[arg(value_name = "SHELL")]
@@ -807,6 +873,32 @@ fn main() -> Result<()> {
                         rrf_alpha,
                         rrf_k,
                     },
+                },
+            )
+        }
+        Cmd::Plan {
+            query,
+            artifacts,
+            queries,
+            kind,
+            prefix_rows,
+            max_gap,
+            curl,
+            top,
+        } => {
+            let cfg = load_config(&site)?;
+            let dir = artifacts.unwrap_or_else(|| cfg.out.clone());
+            let queries = queries.unwrap_or_else(|| cfg.root.join("fixtures/queries.toml"));
+            chops_search::plan::plan(
+                &dir,
+                &chops_search::plan::PlanArgs {
+                    query: query.as_deref(),
+                    queries: &queries,
+                    kind: kind.as_deref(),
+                    prefix_rows,
+                    max_gap,
+                    curl: curl.as_deref(),
+                    top,
                 },
             )
         }
@@ -1465,6 +1557,31 @@ mod tests {
         assert_eq!(
             url_for(Path::new("blog/2024-06-04-x/index.md"), &f),
             "/blog/custom/"
+        );
+    }
+
+    #[test]
+    fn every_subcommand_has_an_example() {
+        let cmd = Cli::command();
+        for sub in cmd.get_subcommands().filter(|s| !s.is_hide_set()) {
+            let name = sub.get_name();
+            assert!(
+                AFTER_HELP.contains(&format!("chops-search {name}")),
+                "AFTER_HELP has no example for `{name}`"
+            );
+        }
+    }
+
+    /// The dynamic completer is invoked through an env var, not a
+    /// subcommand, so the test above cannot see it. Pin the exact
+    /// idiom: `CompleteEnv` reads `COMPLETE=<shell>` and the shell
+    /// sources the output — a line advertising anything else would be
+    /// wrong for every user who copies it.
+    #[test]
+    fn dynamic_completion_idiom_is_advertised() {
+        assert!(
+            AFTER_HELP.contains("COMPLETE=fish chops-search | source"),
+            "AFTER_HELP lost the dynamic completion example"
         );
     }
 }
